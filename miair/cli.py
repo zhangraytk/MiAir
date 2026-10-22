@@ -33,6 +33,7 @@ def parse_args():
     parser.add_argument("--account", default="", help="小米账号")
     parser.add_argument("--password", default="", help="小米密码")
     parser.add_argument("--mi-did", default="", help="设备 DID (逗号分隔)")
+    parser.add_argument("--airplay-mode", choices=["legacy", "experimental"], default="", help="AirPlay 模式 (legacy / experimental)")
     return parser.parse_args()
 
 
@@ -57,6 +58,8 @@ def main():
         config.password = args.password
     if args.mi_did:
         config.mi_did = args.mi_did
+    if args.airplay_mode:
+        config.airplay_mode = args.airplay_mode
 
     # 启动 (即使没有配置账号/设备也可以启动，用户通过 Web 界面配置)
     from miair.app import MiAir

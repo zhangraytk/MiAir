@@ -1224,6 +1224,17 @@
                             <span class="slider"></span>
                         </label>
                     </div>
+
+                    <div class="form-group" style="margin-top: 16px;">
+                        <label class="form-label">AirPlay 接收模式</label>
+                        <select class="form-input" id="select-airplay-mode">
+                            <option value="legacy">经典模式 (AirPlay 1 / RAOP，默认)</option>
+                            <option value="experimental">实验模式 (Shairport Sync AirPlay 2)</option>
+                        </select>
+                        <div class="help-block" style="margin-top: 4px; font-size: 11px; color: var(--text-muted);">
+                            实验模式采用 Shairport Sync + NQPTP，支持多房间同步与缓冲流。当环境缺少依赖时自动回退至经典模式。
+                        </div>
+                    </div>
                 </div>
 
                 <div class="section">
@@ -1260,32 +1271,57 @@
         <div class="modal">
             <div class="modal-header">
                 <div class="modal-title">管理小米账号</div>
-                <div class="modal-desc">通过 Cookie 登录以发现设备</div>
+                <div class="modal-desc">选择登录方式以发现小爱音箱设备</div>
             </div>
 
-            <div class="form-group">
-                <label class="form-label">userId</label>
-                <input type="text" class="form-input" id="input-userId" placeholder="通常是一串数字">
+            <div style="display:flex; gap:8px; margin-bottom:16px;">
+                <button type="button" class="btn btn-primary" id="tab-login-pwd" onclick="switchLoginTab('pwd')" style="flex:1;">账号密码登录</button>
+                <button type="button" class="btn btn-secondary" id="tab-login-cookie" onclick="switchLoginTab('cookie')" style="flex:1;">Cookie / Token 登录</button>
             </div>
 
-            <div class="form-group">
-                <label class="form-label">passToken</label>
-                <input type="password" class="form-input" id="input-passToken" placeholder="登录生成的访问令牌">
+            <!-- Tab 1: 账号密码登录 -->
+            <div id="pane-login-pwd">
+                <div class="form-group">
+                    <label class="form-label">小米账号</label>
+                    <input type="text" class="form-input" id="input-account" placeholder="手机号 / 小米ID / 邮箱">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">小米密码</label>
+                    <input type="password" class="form-input" id="input-password" placeholder="小米账号密码">
+                </div>
+                <div class="help-block">
+                    推荐优先使用小米账号与密码直接登录。若因二次验证导致失败，可切换至右侧 Cookie / Token 方式登录。
+                </div>
             </div>
 
-            <div class="help-block">
-                打开 <a href="https://account.xiaomi.com" class="text-link" target="_blank">account.xiaomi.com</a> 并登录，按下
-                F12 进入开发人员工具 → 选择 应用程序 (Application) → Cookies，即可找到
-                <code>userId</code> 与 <code>passToken</code>。
+            <!-- Tab 2: Cookie 登录 -->
+            <div id="pane-login-cookie" style="display:none;">
+                <div class="form-group">
+                    <label class="form-label">userId / cUserId</label>
+                    <input type="text" class="form-input" id="input-userId" placeholder="通常是一串数字 (如 2304443348)">
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">passToken 或 serviceToken</label>
+                    <input type="password" class="form-input" id="input-passToken" placeholder="登录生成的 passToken 或 serviceToken">
+                </div>
+
+                <div class="help-block">
+                    <b>推荐方式 (更稳定)：</b><br>
+                    电脑浏览器登录 <a href="https://account.xiaomi.com" class="text-link" target="_blank">account.xiaomi.com</a> 后，在同一浏览器打开 <a href="https://account.xiaomi.com/pass/serviceLogin?sid=micoapi" class="text-link" target="_blank">micoapi 授权链接</a>，页面跳转至 mina.mi.com 后按 F12 → Application → Cookies，找到 <code>serviceToken</code> 与 <code>userId</code> 填入（不受设备指纹限制）。
+                </div>
             </div>
 
             <div class="tip" id="tip-account"></div>
 
-            <div class="modal-footer">
-                <button class="btn btn-secondary" onclick="closeAccountModal()">取消</button>
-                <button class="btn btn-primary" id="btn-login" onclick="loginXiaomi()">
-                    登录
-                </button>
+            <div class="modal-footer" style="display:flex; justify-content:space-between; align-items:center;">
+                <button type="button" class="btn btn-secondary" style="color:var(--danger, #ff4d4f);" onclick="clearXiaomiAccount()">清空凭据</button>
+                <div style="display:flex; gap:8px;">
+                    <button class="btn btn-secondary" onclick="closeAccountModal()">取消</button>
+                    <button class="btn btn-primary" id="btn-login" onclick="loginXiaomi()">
+                        登录
+                    </button>
+                </div>
             </div>
         </div>
     </div>
@@ -1396,12 +1432,43 @@
             }
         }
 
+        let _currentLoginTab = 'pwd';
+        function switchLoginTab(tab) {
+            _currentLoginTab = tab;
+            const tabPwd = document.getElementById('tab-login-pwd');
+            const tabCookie = document.getElementById('tab-login-cookie');
+            const panePwd = document.getElementById('pane-login-pwd');
+            const paneCookie = document.getElementById('pane-login-cookie');
+            if (!tabPwd || !tabCookie) return;
+            if (tab === 'pwd') {
+                tabPwd.className = 'btn btn-primary';
+                tabCookie.className = 'btn btn-secondary';
+                panePwd.style.display = 'block';
+                paneCookie.style.display = 'none';
+            } else {
+                tabPwd.className = 'btn btn-secondary';
+                tabCookie.className = 'btn btn-primary';
+                panePwd.style.display = 'none';
+                paneCookie.style.display = 'block';
+            }
+        }
+
         function loadFormData(data) {
+            if (data.account) {
+                document.getElementById('input-account').value = data.account;
+            }
             if (data.cookie) {
-                const uid = data.cookie.match(/userId=([^;]+)/);
-                const ptk = data.cookie.match(/passToken=([^;]+)/);
+                const uid = data.cookie.match(/(?:userId|cUserId)=([^;]+)/);
+                const ptk = data.cookie.match(/(?:passToken|serviceToken)=([^;]+)/);
                 if (uid) document.getElementById('input-userId').value = uid[1];
                 if (ptk) document.getElementById('input-passToken').value = ptk[1];
+                if (!data.account && (uid || ptk)) {
+                    switchLoginTab('cookie');
+                } else {
+                    switchLoginTab('pwd');
+                }
+            } else {
+                switchLoginTab('pwd');
             }
             if (data.dlna_port) document.getElementById('input-dlna-port').value = data.dlna_port;
             if (data.web_port) document.getElementById('input-web-port').value = data.web_port;
@@ -1421,6 +1488,9 @@
             if (data.auto_restart !== undefined) {
                 document.getElementById('chk-auto-restart').checked = data.auto_restart;
             }
+            if (data.airplay_mode) {
+                document.getElementById('select-airplay-mode').value = data.airplay_mode;
+            }
             toggleDefaultVolume();
 
             // 保存初始值快照，用于变更检测
@@ -1430,6 +1500,7 @@
                 default_volume: parseInt(document.getElementById('input-default-volume').value),
                 follow_device_volume: document.getElementById('chk-follow-volume').checked,
                 auto_restart: document.getElementById('chk-auto-restart').checked,
+                airplay_mode: document.getElementById('select-airplay-mode').value,
                 dlna_port: parseInt(document.getElementById('input-dlna-port').value),
                 web_port: parseInt(document.getElementById('input-web-port').value),
             };
@@ -1853,25 +1924,59 @@
         async function loginXiaomi() {
             const btn = document.getElementById('btn-login');
             const tip = document.getElementById('tip-account');
-            const uid = document.getElementById('input-userId').value.trim();
-            const token = document.getElementById('input-passToken').value.trim();
+            let payload = {};
 
-            if (!uid || !token) {
-                showTip(tip, '请输入完整的信息', 'error');
-                return;
+            if (_currentLoginTab === 'pwd') {
+                const account = document.getElementById('input-account').value.trim();
+                const password = document.getElementById('input-password').value.trim();
+                if (!account || !password) {
+                    showTip(tip, '请输入账号与密码', 'error');
+                    return;
+                }
+                payload = { account, password, cookie: '' };
+            } else {
+                const uid = document.getElementById('input-userId').value.trim();
+                const token = document.getElementById('input-passToken').value.trim();
+
+                if (!uid || !token) {
+                    showTip(tip, '请输入完整的信息', 'error');
+                    return;
+                }
+
+                if (token.startsWith('V1:') || token.length > 200) {
+                    payload = { cookie: `userId=${uid}; passToken=${token}` };
+                } else {
+                    payload = { cookie: `userId=${uid}; serviceToken=${token}` };
+                }
             }
 
-            showLoading(btn, true, '正在保存');
+            showLoading(btn, true, '正在保存并登录');
             try {
                 await fetch('./api/setting', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ cookie: `userId=${uid}; passToken=${token}` }),
+                    body: JSON.stringify(payload),
                 });
                 showLoading(btn, true, '正在同步');
                 setTimeout(() => location.reload(), 3000);
             } catch (e) {
                 showLoading(btn, true, '正在同步');
+                setTimeout(() => location.reload(), 4000);
+            }
+        }
+
+        async function clearXiaomiAccount() {
+            if (!confirm('确定要清空已保存的小米账号与凭据吗？')) return;
+            const btn = document.getElementById('btn-login');
+            showLoading(btn, true, '正在清空');
+            try {
+                await fetch('./api/setting', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ clear_account: true }),
+                });
+                setTimeout(() => location.reload(), 3000);
+            } catch (e) {
                 setTimeout(() => location.reload(), 4000);
             }
         }
@@ -1884,6 +1989,7 @@
                 default_volume: parseInt(document.getElementById('input-default-volume').value),
                 follow_device_volume: document.getElementById('chk-follow-volume').checked,
                 auto_restart: document.getElementById('chk-auto-restart').checked,
+                airplay_mode: document.getElementById('select-airplay-mode').value,
                 dlna_port: parseInt(document.getElementById('input-dlna-port').value),
                 web_port: parseInt(document.getElementById('input-web-port').value),
             };

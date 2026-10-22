@@ -94,6 +94,10 @@ class Config:
     # 自动重启（当登录失败或服务异常时）
     auto_restart: bool = False
     voice_poll_interval: int = 1
+    # AirPlay 接收模式与配置
+    airplay_mode: str = "legacy"  # "legacy" (AirPlay 1) 或 "experimental" (AirPlay 2)
+    airplay2_port: int = 7000
+    airplay2_name_suffix: str = " [AP2]"
     speakers: dict = field(default_factory=dict)
 
     # 保存配置的线程锁（类级别共享）

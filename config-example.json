@@ -14,5 +14,6 @@
     "resume_delay_seconds": 5,
     "enable_voice_control": false,
     "voice_poll_interval": 1,
+    "airplay_mode": "legacy",
     "speakers": {}
 }

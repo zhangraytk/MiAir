@@ -20,16 +20,19 @@ APP_UA = "APP/com.xiaomi.mihome APPV/60209 iosPassportSDK/3.9.0 iOS/17.5.1"
 
 
 def parse_cookie_string(cookie_str: str) -> dict:
-    """解析 cookie 字符串，提取 userId 和 passToken"""
+    """解析 cookie 字符串，提取 userId, passToken, serviceToken, ssecurity, deviceId"""
     result = {}
-    for item in cookie_str.split(";"):
+    for item in (cookie_str or "").split(";"):
         item = item.strip()
         if "=" in item:
             key, value = item.split("=", 1)
             key = key.strip()
             value = value.strip()
-            if key in ("userId", "passToken"):
-                result[key] = value
+            if key in ("userId", "cUserId", "passToken", "serviceToken", "ssecurity", "deviceId"):
+                if key == "cUserId" and "userId" not in result:
+                    result["userId"] = value
+                else:
+                    result[key] = value
     return result
 
 
@@ -56,16 +59,41 @@ class AuthManager:
 
         token_store = self.config.mi_token_home
 
-        # 如果有 cookie，使用 cookie 中的信息创建 MiAccount
+        # 如果有 cookie，使用 cookie 中的信息
         token_data = {}
         if self.config.cookie:
             token_data = parse_cookie_string(self.config.cookie)
 
         uid = token_data.get("userId")
         ptk = token_data.get("passToken")
+        stk = token_data.get("serviceToken")
+        ssecurity = token_data.get("ssecurity", "")
+        custom_dev_id = token_data.get("deviceId")
 
-        # 创建 MiAccount，如果使用 cookie 登录，传入空的账号密码
-        if uid and ptk:
+        # 1. 优先：如果 Cookie 中直接带有针对 micoapi 的 serviceToken 和 userId，直接使用
+        if uid and stk:
+            dev_id = custom_dev_id or hashlib.md5(f"miair_{uid}".encode()).hexdigest()[:16].upper()
+            self.account = MiAccount(
+                self.session,
+                "",  # 空账号
+                "",  # 空密码
+                token_store=token_store,
+            )
+            self.account.now_ua = APP_UA
+            self.account.token = {
+                "userId": str(uid),
+                "deviceId": dev_id,
+                "ssecurity": ssecurity,
+                "serviceToken": stk,
+                "micoapi": (ssecurity, stk),
+            }
+            if self.account.token_store:
+                self.account.token_store.save_token(self.account.token)
+            self._logged_in = True
+            log.info("使用 Cookie 中的 serviceToken 直接登录成功")
+
+        # 2. 如果提供了 passToken，尝试换取 serviceToken
+        elif uid and ptk:
             self.account = MiAccount(
                 self.session,
                 "",  # 空账号
@@ -74,7 +102,7 @@ class AuthManager:
             )
             self.account.now_ua = APP_UA
 
-            # 1. 优先检查本地缓存是否已有针对该 uid/ptk 的有效 serviceToken
+            # 优先检查本地缓存是否已有针对该 uid/ptk 的有效 serviceToken
             cached = self.account.token_store.load_token() if self.account.token_store else None
             if (
                 cached
@@ -86,8 +114,7 @@ class AuthManager:
                 self._logged_in = True
                 log.info("使用本地缓存的 micoapi serviceToken 登录成功")
             else:
-                # 2. 使用 passToken 通过米家 SDK 接口换取真正的长期有效 serviceToken
-                dev_id = hashlib.md5(f"miair_{uid}".encode()).hexdigest()[:16].upper()
+                dev_id = custom_dev_id or hashlib.md5(f"miair_{uid}".encode()).hexdigest()[:16].upper()
                 headers = {"User-Agent": APP_UA}
                 cookies = {
                     "sdkVersion": "3.9",
@@ -137,8 +164,10 @@ class AuthManager:
                 except Exception as e:
                     self._logged_in = False
                     log.error(f"通过 Cookie/passToken 换取小米凭据异常: {e}")
-        else:
-            # 使用账号密码登录
+
+        # 3. 回退或直接使用账号密码登录
+        if not self._logged_in and self.config.account and self.config.password:
+            log.info(f"正在尝试使用小米账号密码登录 ({self.config.account})...")
             self.account = MiAccount(
                 self.session,
                 self.config.account,
@@ -152,7 +181,7 @@ class AuthManager:
             try:
                 await self.account.login("micoapi")
                 self._logged_in = True
-                log.info("小米账号登录成功")
+                log.info("小米账号密码登录成功")
             except Exception as e:
                 self._logged_in = False
                 if not hasattr(self.account, 'token') or self.account.token is None:
@@ -179,7 +208,7 @@ class AuthManager:
                         "  3. 确保关闭了代理/VPN"
                     )
                 else:
-                    log.error(f"登录失败: {e}")
+                    log.error(f"账号密码登录失败: {e}")
 
                 if self.config.auto_restart:
                     log.warning("检测到登录失败，正在尝试自动重启程序以恢复服务...")

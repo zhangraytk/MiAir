@@ -37,23 +37,46 @@ class SpeakerAirPlay:
         self._play_grace_until: float = 0.0  # play 后宽限期
 
     async def start(self):
-        """启动该音箱的 AirPlay 服务"""
+        """启动该音箱的 AirPlay 服务 (支持 Legacy AP1 与 Experimental AP2)"""
         try:
             # 保存当前事件循环，以便在 RTSP 线程中安全调用异步函数
             self._loop = asyncio.get_running_loop()
 
-            self.airplay_server = AirPlayServer(
-                self.hostname, self.device_name, self.shared_zeroconf,
-                speaker_hardware=self.speaker.hardware
-            )
+            mode = getattr(self.config, 'airplay_mode', 'legacy')
+            server_started = False
 
-            # 设置回调：直接播放到这个音箱
-            self.airplay_server.on_play_start = self._on_play_start
-            self.airplay_server.on_play_stop = self._on_play_stop
-            self.airplay_server.on_volume_change = self._on_volume_change
+            if mode == 'experimental':
+                try:
+                    from miair.airplay.ap2_bridge import AirPlay2Server
+                    rtsp_port = getattr(self.config, 'airplay2_port', 7000)
+                    log.info(f"[{self.device_name}] 正在尝试以 AirPlay 2 实验模式启动...")
+                    self.airplay_server = AirPlay2Server(
+                        hostname=self.hostname,
+                        device_name=self.device_name,
+                        speaker_hardware=self.speaker.hardware,
+                        rtsp_port=rtsp_port,
+                        config=self.config
+                    )
+                    self.airplay_server.on_play_start = self._on_play_start
+                    self.airplay_server.on_play_stop = self._on_play_stop
+                    self.airplay_server.on_volume_change = self._on_volume_change
+                    await self.airplay_server.start()
+                    server_started = True
+                    log.info(f"音箱 {self.device_name} 的 AirPlay 2 实验服务已启动，RTSP 端口: {self.airplay_server.rtsp_port}")
+                except Exception as e:
+                    log.warning(f"[{self.device_name}] 启动 AirPlay 2 实验模式失败: {e}，自动回退到 AirPlay 1 传统模式")
+                    self.airplay_server = None
 
-            await self.airplay_server.start()
-            log.info(f"音箱 {self.device_name} 的 AirPlay 服务已启动，端口: {self.airplay_server.rtsp_port}")
+            if not server_started:
+                self.airplay_server = AirPlayServer(
+                    self.hostname, self.device_name, self.shared_zeroconf,
+                    speaker_hardware=self.speaker.hardware
+                )
+                self.airplay_server.on_play_start = self._on_play_start
+                self.airplay_server.on_play_stop = self._on_play_stop
+                self.airplay_server.on_volume_change = self._on_volume_change
+                await self.airplay_server.start()
+                log.info(f"音箱 {self.device_name} 的 AirPlay 1 服务已启动，端口: {self.airplay_server.rtsp_port}")
         except Exception as e:
             log.error(f"启动音箱 {self.device_name} 的 AirPlay 服务失败: {e}")
             raise

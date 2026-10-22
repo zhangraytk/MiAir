@@ -220,6 +220,7 @@ def create_web_app(config: Config, app_instance) -> web.Application:
             "proxy_enabled": config.proxy_enabled,
             "auto_play_on_set_uri": config.auto_play_on_set_uri,
             "mi_did": config.mi_did,
+            "account": config.account,
             "has_account": bool(config.account or config.cookie),
             "cookie": _mask_cookie(config.cookie),
             "dlna_running": app_instance.dlna_running,
@@ -259,6 +260,25 @@ def create_web_app(config: Config, app_instance) -> web.Application:
         """保存设置 (账号、密码、cookie、选中的设备)"""
         data = await request.json()
 
+        # 清空账号与凭据
+        if data.get("clear_account"):
+            config.account = ""
+            config.password = ""
+            config.cookie = ""
+            token_store = config.mi_token_home
+            if os.path.exists(token_store):
+                try:
+                    os.remove(token_store)
+                except Exception:
+                    pass
+            config.save()
+            resp = web.json_response({"ok": True, "message": "账号与凭据已清空，正在重启..."})
+            await resp.prepare(request)
+            await resp.write_eof()
+            log.info("账号与凭据已清空，正在重启进程...")
+            asyncio.get_running_loop().call_soon(_restart_process)
+            return resp
+
         # 更新账号信息
         if "account" in data:
             config.account = data["account"]
@@ -293,6 +313,10 @@ def create_web_app(config: Config, app_instance) -> web.Application:
             config.follow_device_volume = data["follow_device_volume"]
         if "auto_restart" in data:
             config.auto_restart = data["auto_restart"]
+        if "airplay_mode" in data:
+            config.airplay_mode = data["airplay_mode"]
+        if "airplay2_port" in data:
+            config.airplay2_port = int(data["airplay2_port"])
 
         # 更新 speaker 名称和兼容模式
         if "speakers" in data:
@@ -317,9 +341,9 @@ def create_web_app(config: Config, app_instance) -> web.Application:
 
     async def handle_get_devices(request):
         """获取小米账号下所有设备列表"""
-        if not config.cookie:
+        if not config.cookie and not (config.account and config.password):
             return web.json_response(
-                {"error": "请先配置 Cookie"}, status=400
+                {"error": "请先配置账号密码或 Cookie"}, status=400
             )
 
         try:
