@@ -1,8 +1,23 @@
 # MiAir - 为小爱音箱添加 DLNA 与 AirPlay 支持
 
+> [!NOTE]
+> 本分支为 **AirPlay 2 实验性分支**（`feature/airplay2-experimental`）。
+
 ## 引用以下开源项目代码 由衷感谢
 
-**[XiaoMusic](https://github.com/hanxi/xiaomusic "XiaoMusic")** &ensp; **[AirPlay2 Receiver](https://github.com/openairplay/airplay2-receiver "AirPlay2 Receiver")** &ensp; **[MaCast](https://github.com/xfangfang/Macast "MaCast")**
+**[XiaoMusic](https://github.com/hanxi/xiaomusic "XiaoMusic")** &ensp; **[AirPlay2 Receiver](https://github.com/openairplay/airplay2-receiver "AirPlay2 Receiver")** &ensp; **[MaCast](https://github.com/xfangfang/Macast "MaCast")** &ensp; **[shairport-sync](https://github.com/mikebrady/shairport-sync "shairport-sync")**
+
+## AirPlay 2 实验性支持说明
+
+本分支引入了基于 Shairport Sync + NQPTP 的 AirPlay 2 实验性架构：
+
+- **切换模式**：
+  - **Web 管理界面**：在设置中将 AirPlay 模式选为 `AirPlay 2 (实验性)`。
+  - **HAOS Add-on**：在配置项中将 `airplay_mode` 设为 `experimental`。
+- **平滑回退**：若系统未编译/未安装 NQPTP 或 Shairport Sync，程序会自动回退到纯 Python 实现的 AirPlay 1 经典模式，保证基础播放可用。
+
+### 已知问题 (Known Issues)
+- **多设备播放不同步**：由于小爱音箱底层通过 HTTP 从本地音频服务拉取 WAV 数据流播放，不同音箱硬件解码与网络缓冲延迟存在差异，在苹果设备同时勾选多台小爱音箱播放时，设备之间会出现可感知的播放时差与不同步现象。单设备独立推流播放正常。
 
 ## 快速开始
 ## Windows
