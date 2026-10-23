@@ -179,12 +179,19 @@ def _restart_process():
     """重启当前 Python 进程"""
     log.info(f"重启进程: {sys.executable} {sys.argv}")
     
+    # 提前终止外部子进程（如 shairport-sync），避免端口占用或成为孤儿进程
+    try:
+        import subprocess
+        if sys.platform.startswith("linux"):
+            subprocess.run(["pkill", "-TERM", "shairport-sync"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
     # 检测是否在 Docker 容器中
     if _is_docker():
-        # Docker 环境下，直接退出进程
-        # Docker 容器已设置 restart=unless-stopped，会自动重启
-        log.info("在 Docker 环境中，退出进程，Docker 会自动重启容器")
-        # 使用 exit code 0，unless-stopped 策略下任何退出都会重启
+        # Docker 环境下，退出进程，外层守护脚本或 Docker restart 策略会重新拉起
+        log.info("在 Docker 环境中，退出进程，容器或外层脚本将自动重新拉起服务")
+        # 使用 exit code 0
         os._exit(0)
     elif sys.platform == "win32":
         # Windows 上 os.execv 行为不同，使用 subprocess 重启
@@ -225,12 +232,14 @@ def create_web_app(config: Config, app_instance) -> web.Application:
             "cookie": _mask_cookie(config.cookie),
             "dlna_running": app_instance.dlna_running,
             "renderers_count": len(app_instance.renderers),
-            # 实验性功能
+            # 实验性功能与 AirPlay 模式
             "auto_resume_on_interrupt": config.auto_resume_on_interrupt,
             "resume_delay_seconds": config.resume_delay_seconds,
             "default_volume": config.default_volume,
             "follow_device_volume": config.follow_device_volume,
             "auto_restart": config.auto_restart,
+            "airplay_mode": config.airplay_mode,
+            "airplay2_port": config.airplay2_port,
         }
 
         # 返回已配置的 speakers 信息

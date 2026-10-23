@@ -65,6 +65,11 @@ class SpeakerAirPlay:
                     log.info(f"音箱 {self.device_name} 的 AirPlay 2 实验服务已启动，RTSP 端口: {self.airplay_server.rtsp_port}")
                 except Exception as e:
                     log.warning(f"[{self.device_name}] 启动 AirPlay 2 实验模式失败: {e}，自动回退到 AirPlay 1 传统模式")
+                    if self.airplay_server:
+                        try:
+                            await self.airplay_server.stop()
+                        except Exception as stop_err:
+                            log.debug(f"清理失败的 AirPlay 2 实例异常: {stop_err}")
                     self.airplay_server = None
 
             if not server_started:

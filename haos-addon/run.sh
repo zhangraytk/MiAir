@@ -126,7 +126,9 @@ fi
 
 # 6. 优雅退出信号捕获
 MIAIR_PID=""
+SHUTDOWN=0
 term_handler() {
+    SHUTDOWN=1
     echo ""
     echo "[MiAir HAOS] 接收到终止信号 (SIGTERM/SIGINT)，开始优雅退出..."
     if [ -n "$MIAIR_PID" ]; then
@@ -141,13 +143,23 @@ term_handler() {
 
 trap 'term_handler' SIGTERM SIGINT
 
-# 7. 启动 MiAir 主程序
+# 7. 启动并守护 MiAir 主程序
 echo "[MiAir HAOS] 启动 MiAir 主应用程序..."
-python3 miair.py --conf-path "${CONF_DIR}" --verbose &
-MIAIR_PID=$!
+while [ "$SHUTDOWN" -eq 0 ]; do
+    python3 miair.py --conf-path "${CONF_DIR}" --verbose &
+    MIAIR_PID=$!
 
-# 等待主进程
-wait "$MIAIR_PID"
-EXIT_CODE=$?
-echo "[MiAir HAOS] MiAir 进程已退出，代码: ${EXIT_CODE}"
-exit $EXIT_CODE
+    # 等待主进程
+    wait "$MIAIR_PID" || true
+    EXIT_CODE=$?
+
+    if [ "$SHUTDOWN" -eq 1 ]; then
+        break
+    fi
+
+    echo "[MiAir HAOS] MiAir 进程已退出 (代码: ${EXIT_CODE})，2 秒后自动重新拉起..."
+    sleep 2
+done
+
+echo "[MiAir HAOS] 守护退出完成。"
+exit 0

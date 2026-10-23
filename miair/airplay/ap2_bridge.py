@@ -54,13 +54,23 @@ class ShairportSyncConfig:
         notify_script = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "ap2_notify.py")
         )
-        cmd_start = f'"{python_bin}" "{notify_script}" {notify_port} play_begin'
-        cmd_stop = f'"{python_bin}" "{notify_script}" {notify_port} play_end'
-        cmd_vol = f'"{python_bin}" "{notify_script}" {notify_port} volume '
+        # 路径转义，仅在包含空格时用转义引号包裹，避免 libconfig 产生嵌套双引号语法错误
+        def _quote(path: str) -> str:
+            clean = path.replace("\\", "\\\\").replace('"', '\\"')
+            return f'\\"{clean}\\"' if " " in path else clean
+
+        py_cmd = _quote(python_bin)
+        script_cmd = _quote(notify_script)
+        cmd_start = f"{py_cmd} {script_cmd} {notify_port} play_begin"
+        cmd_stop = f"{py_cmd} {script_cmd} {notify_port} play_end"
+        cmd_vol = f"{py_cmd} {script_cmd} {notify_port} volume "
+
+        dev_name_esc = device_name.replace("\\", "\\\\").replace('"', '\\"')
+        fifo_path_esc = fifo_path.replace("\\", "\\\\").replace('"', '\\"')
 
         content = f"""// MiAir 自动生成的 Shairport Sync AirPlay 2 配置文件
 general = {{
-    name = "{device_name}";
+    name = "{dev_name_esc}";
     output_backend = "pipe";
     port = {rtsp_port};
     run_this_when_volume_is_set = "{cmd_vol}";
@@ -75,7 +85,7 @@ sessioncontrol = {{
 }};
 
 pipe = {{
-    name = "{fifo_path}";
+    name = "{fifo_path_esc}";
 }};
 
 metadata = {{
@@ -329,6 +339,9 @@ class AirPlay2Server:
             on_active_change=self._on_bridge_active_change,
         )
         self._sps_proc: subprocess.Popen | None = None
+        self._stdout_thread: threading.Thread | None = None
+        self._stderr_thread: threading.Thread | None = None
+        self._stderr_lines: list[str] = []
 
     @property
     def is_playing(self) -> bool:
@@ -362,7 +375,8 @@ class AirPlay2Server:
             mdns_backend=mdns_backend,
         )
 
-        # 5. 检查并启动 Shairport Sync 外部进程
+        # 5. 确保 NQPTP 运行 (Linux) 并启动 Shairport Sync
+        self._ensure_nqptp()
         self._start_shairport_sync()
 
         log.info(f"[AirPlay 2] 服务已就绪: {self.device_name}")
@@ -463,6 +477,30 @@ class AirPlay2Server:
             if self.on_play_stop:
                 self.on_play_stop()
 
+    def _ensure_nqptp(self):
+        """确保 NQPTP 守护进程已启动（Linux 下 AirPlay 2 PTP 时钟同步必需）"""
+        if not sys.platform.startswith("linux"):
+            return
+        nqptp_bin = shutil.which("nqptp")
+        if not nqptp_bin:
+            log.warning("[AirPlay 2] 系统未找到 nqptp 命令，PTP 时钟同步可能受限")
+            return
+
+        try:
+            res = subprocess.run(["pgrep", "nqptp"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if res.returncode == 0:
+                log.info("[AirPlay 2] 检测到 NQPTP 时钟守护进程已在运行")
+                return
+        except Exception:
+            pass
+
+        try:
+            log.info("[AirPlay 2] 正在启动 NQPTP 时钟守护进程...")
+            subprocess.Popen([nqptp_bin, "-d"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(0.3)
+        except Exception as e:
+            log.warning(f"[AirPlay 2] 尝试启动 NQPTP 失败: {e}")
+
     def _start_shairport_sync(self):
         """启动 Shairport Sync 进程（如果系统已安装）"""
         sps_bin = shutil.which("shairport-sync")
@@ -480,12 +518,55 @@ class AirPlay2Server:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                bufsize=1,
             )
             log.info(
                 f"[AirPlay 2] 已启动 Shairport Sync 进程 (PID: {self._sps_proc.pid})"
             )
         except Exception as e:
-            log.error(f"[AirPlay 2] 启动 Shairport Sync 进程失败: {e}")
+            log.error(f"[AirPlay 2] 启动 Shairport Sync 进程异常: {e}")
+            raise RuntimeError(f"启动 Shairport Sync 失败: {e}") from e
+
+        # 启动日志监听线程，防止管道死锁并记录错误
+        self._stderr_lines = []
+
+        def _read_output(stream, is_stderr: bool):
+            try:
+                for line in iter(stream.readline, ""):
+                    line_str = line.strip()
+                    if line_str:
+                        if is_stderr:
+                            self._stderr_lines.append(line_str)
+                            if len(self._stderr_lines) > 20:
+                                self._stderr_lines.pop(0)
+                            log.warning(f"[ShairportSync] {line_str}")
+                        else:
+                            log.info(f"[ShairportSync] {line_str}")
+            except Exception:
+                pass
+            finally:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+
+        self._stdout_thread = threading.Thread(
+            target=_read_output, args=(self._sps_proc.stdout, False), name="AP2-SPS-Stdout", daemon=True
+        )
+        self._stderr_thread = threading.Thread(
+            target=_read_output, args=(self._sps_proc.stderr, True), name="AP2-SPS-Stderr", daemon=True
+        )
+        self._stdout_thread.start()
+        self._stderr_thread.start()
+
+        # 启动后快速健康检查，确认未因配置语法错误或端口冲突立即崩溃
+        time.sleep(0.5)
+        poll_code = self._sps_proc.poll()
+        if poll_code is not None:
+            err_detail = " | ".join(self._stderr_lines) if self._stderr_lines else "无输出"
+            err_msg = f"Shairport Sync 进程启动后立即退出 (代码: {poll_code}): {err_detail}"
+            log.error(f"[AirPlay 2] {err_msg}")
+            raise RuntimeError(err_msg)
 
     # ============================================================
     # 模拟与测试辅助方法

@@ -1378,23 +1378,26 @@
         let _initialDeviceNames = null;
         let _initialCompatibilityModes = null;
 
+        let _devicesLoaded = false;
+        let _deviceListFetchCount = 0;
+
         document.addEventListener('DOMContentLoaded', init);
 
         async function init() {
             await fetchSetting(true);
-            let devicesLoaded = currentSetting.renderers_count > 0;
             setInterval(() => {
-                // 设备列表未加载时持续请求，直到设备出现
-                fetchSetting(!devicesLoaded);
-                if (currentSetting.dlna_running) fetchRenderers();
-                if (!devicesLoaded && currentSetting.renderers_count > 0) {
-                    devicesLoaded = true;
-                }
+                // 设备列表未加载且未超过连续重试次数时才请求 device_list，避免接口风控与日志轰炸
+                const shouldFetchDevices = !_devicesLoaded && _deviceListFetchCount < 3;
+                fetchSetting(shouldFetchDevices);
+                if (currentSetting && currentSetting.dlna_running) fetchRenderers();
             }, 5000);
         }
 
         async function fetchSetting(withDeviceList) {
             try {
+                if (withDeviceList) {
+                    _deviceListFetchCount++;
+                }
                 const url = withDeviceList ? './api/setting?need_device_list=true' : './api/setting';
                 const resp = await fetch(url);
                 const data = await resp.json();
@@ -1416,8 +1419,10 @@
                 }
 
                 if (data.device_list && withDeviceList) {
+                    _devicesLoaded = true;
                     renderDeviceList(data.device_list, data.mi_did || '');
                 } else if (!data.has_account && withDeviceList) {
+                    _devicesLoaded = true;
                     document.getElementById('device-list').innerHTML = `
                         <div style="text-align:center; padding:40px;">
                             <p style="color:var(--text-muted); font-size:14px; margin-bottom:16px;">请先配置小米账号以发现设备</p>
@@ -1994,13 +1999,12 @@
                 web_port: parseInt(document.getElementById('input-web-port').value),
             };
 
-            // 检查是否有变更
+            // 检查是否有变更 (仅作提示，不强行阻止用户提交保存)
             if (_initialFormValues) {
                 const changed = Object.keys(data).some(key => data[key] !== _initialFormValues[key]);
                 if (!changed) {
                     const tip = document.getElementById('tip-experimental');
-                    showTip(tip, '没有变更的设置项', 'error');
-                    return;
+                    showTip(tip, '配置未变更，正在重新应用并保存', 'info');
                 }
             }
 

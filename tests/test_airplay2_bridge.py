@@ -201,6 +201,61 @@ class TestSpeakerAirPlayModeSwitching(unittest.IsolatedAsyncioTestCase):
         finally:
             await spk_ap.stop()
 
+    async def test_experimental_mode_failure_triggers_fallback_to_airplay1(self):
+        from unittest.mock import patch
+        from miair.airplay.speaker_airplay import SpeakerAirPlay
+        from miair.airplay.server import AirPlayServer
+        from miair.airplay.ap2_bridge import AirPlay2Server
+
+        config = Config(conf_path=self.test_dir, airplay_mode="experimental")
+        spk_ap = SpeakerAirPlay(
+            hostname="127.0.0.1",
+            controller=self.mock_controller,
+            config=config,
+        )
+
+        # 模拟 AirPlay2Server 启动崩溃 (如 shairport-sync 启动异常)
+        with patch.object(AirPlay2Server, "start", side_effect=RuntimeError("Shairport Sync config error")):
+            await spk_ap.start()
+
+        try:
+            # 验证当 AirPlay 2 启动失败时，自动平滑回退为 AirPlay 1 服务
+            self.assertIsInstance(spk_ap.airplay_server, AirPlayServer)
+            self.assertEqual(spk_ap.device_name, "Living Room")
+        finally:
+            await spk_ap.stop()
+
+
+class TestWebAPIAirPlaySettings(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.test_dir = tempfile.mkdtemp(prefix="miair_web_test_")
+        self.config = Config(conf_path=self.test_dir, airplay_mode="experimental", airplay2_port=7002)
+
+    async def asyncTearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    async def test_get_setting_contains_airplay_mode(self):
+        from aiohttp.test_utils import make_mocked_request
+        from miair.web.api import create_web_app
+
+        mock_app = MagicMock()
+        mock_app.dlna_running = False
+        mock_app.renderers = []
+
+        web_app = create_web_app(self.config, mock_app)
+        # 查找 handle_get_setting handler
+        for route in web_app.router.routes():
+            if route.method == "GET" and "/api/setting" in str(route.resource):
+                req = make_mocked_request("GET", "/api/setting?need_device_list=false")
+                resp = await route.handler(req)
+                import json
+                data = json.loads(resp.text)
+                self.assertIn("airplay_mode", data)
+                self.assertEqual(data["airplay_mode"], "experimental")
+                self.assertIn("airplay2_port", data)
+                self.assertEqual(data["airplay2_port"], 7002)
+                break
+
 
 if __name__ == "__main__":
     unittest.main()
