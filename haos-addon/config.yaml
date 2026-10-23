@@ -1,6 +1,6 @@
 name: "MiAir"
 description: "让小米小爱音箱支持 DLNA 与 AirPlay (含实验性 AirPlay 2) 网络流媒体播放"
-version: "1.1.0"
+version: "1.1.2"
 slug: "miair"
 init: false
 arch:
@@ -9,16 +9,21 @@ arch:
 startup: application
 boot: auto
 host_network: true
-host_dbus: true
 privileged:
   - SYS_NICE
   - NET_ADMIN
 ports:
   8300/tcp: 8300
   8200/tcp: 8200
+  7000/tcp: 7000
+  319/udp: 319
+  320/udp: 320
 ports_description:
   8300/tcp: "MiAir Web 管理界面"
   8200/tcp: "DLNA 服务端口"
+  7000/tcp: "AirPlay 2 RTSP 控制端口"
+  319/udp: "PTP 高精度时钟同步事件端口"
+  320/udp: "PTP 高精度时钟常规报文端口"
 webui: "http://[HOST]:[PORT:8300]"
 map:
   - config:rw

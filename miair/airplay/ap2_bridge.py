@@ -511,7 +511,13 @@ class AirPlay2Server:
             )
             return
 
-        cmd = [sps_bin, "-c", self.conf_path]
+        try:
+            ver = subprocess.check_output([sps_bin, "-V"], text=True, timeout=2).strip()
+            log.info(f"[AirPlay 2] 侦测到 Shairport Sync: {ver}")
+        except Exception:
+            pass
+
+        cmd = [sps_bin, "-v", "-c", self.conf_path]
         try:
             self._sps_proc = subprocess.Popen(
                 cmd,
