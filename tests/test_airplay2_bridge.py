@@ -49,6 +49,8 @@ class TestAP2BridgeComponents(unittest.TestCase):
         self.assertIn('output_backend = "pipe";', content)
         self.assertIn("port = 7001;", content)
         self.assertIn(f'name = "{fifo_path}";', content)
+        self.assertIn('output_format = "S16";', content)
+        self.assertIn('output_rate = 44100;', content)
         self.assertIn("55555 play_begin", content)
         self.assertIn("55555 play_end", content)
         self.assertIn("55555 volume", content)

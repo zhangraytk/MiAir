@@ -86,6 +86,8 @@ sessioncontrol = {{
 
 pipe = {{
     name = "{fifo_path_esc}";
+    output_format = "S16";
+    output_rate = 44100;
 }};
 
 metadata = {{
@@ -131,6 +133,7 @@ class FIFOAudioBridge:
         self._is_streaming = False
         self._last_data_time = 0.0
         self._total_bytes_read = 0
+        self._leftover = b""
 
     @property
     def is_streaming(self) -> bool:
@@ -229,6 +232,16 @@ class FIFOAudioBridge:
                 if r:
                     data = os.read(self._fifo_fd, self.chunk_size)
                     if data:
+                        if self._leftover:
+                            data = self._leftover + data
+                            self._leftover = b""
+                        rem = len(data) % 4
+                        if rem:
+                            self._leftover = data[-rem:]
+                            data = data[:-rem]
+                        if not data:
+                            continue
+
                         now = time.time()
                         self._last_data_time = now
                         self._total_bytes_read += len(data)
@@ -305,11 +318,11 @@ class AirPlay2Server:
         self.fifo_path = os.path.join(self.work_dir, f"miair_ap2_{safe_name}.pcm")
         self.conf_path = os.path.join(self.work_dir, f"miair_sps_{safe_name}.conf")
 
-        # 音频格式选择：依据硬件特性选择 WAV 或 MP3
-        from miair.speaker import Speaker
-
-        temp_spk = Speaker(hardware=speaker_hardware)
-        audio_fmt = "mp3" if temp_spk.needs_audio_conversion() else "wav"
+        # 音频格式选择：统一使用无损标准 WAV 输出（零编码延迟、音质无损）
+        # 兼容小爱所有音箱（包含 Play/Play增强版/Pro），避免 ffmpeg 转码延迟与失真
+        audio_fmt = "wav"
+        if config and hasattr(config, "airplay_audio_format") and config.airplay_audio_format:
+            audio_fmt = config.airplay_audio_format
 
         # 复用 MiAir 现有 AudioStreamServer
         self.audio_stream_server = AudioStreamServer(
