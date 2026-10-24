@@ -127,6 +127,7 @@ class FIFOAudioBridge:
 
     DEFAULT_CHUNK_SIZE = 4096  # 1024 samples @ 16-bit 2ch ≈ 23.2ms
     DEFAULT_SILENCE_TIMEOUT = 3.5  # 超过 3.5 秒无音频数据判定为流中断/暂停
+    DEFAULT_STOP_DEBOUNCE_SECONDS = 2.5  # 停止事件防抖宽限期 (防止 HomePod 加入等瞬时组协商中断播放)
 
     def __init__(
         self,
@@ -135,17 +136,20 @@ class FIFOAudioBridge:
         on_active_change: Callable[[bool], None] | None = None,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         silence_timeout: float = DEFAULT_SILENCE_TIMEOUT,
+        stop_debounce_seconds: float = DEFAULT_STOP_DEBOUNCE_SECONDS,
     ):
         self.fifo_path = fifo_path
         self.audio_stream_server = audio_stream_server
         self.on_active_change = on_active_change
         self.chunk_size = chunk_size
         self.silence_timeout = silence_timeout
+        self.stop_debounce_seconds = stop_debounce_seconds
 
         self._running = False
         self._thread: threading.Thread | None = None
         self._fifo_fd: int | None = None
         self._is_streaming = False
+        self._stop_timer: threading.Timer | None = None
         self._last_data_time = 0.0
         self._first_data_time = 0.0
         self._total_bytes_read = 0
@@ -202,6 +206,10 @@ class FIFOAudioBridge:
     def stop(self):
         """停止 FIFO 读取并清理"""
         self._running = False
+        if self._stop_timer is not None:
+            self._stop_timer.cancel()
+            self._stop_timer = None
+
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.0)
             self._thread = None
@@ -227,12 +235,41 @@ class FIFOAudioBridge:
 
     def set_explicit_streaming(self, active: bool):
         """由外部事件钩子显式通知流状态变化"""
-        if active and not self._is_streaming:
-            self._is_streaming = True
-            self._last_data_time = time.time()
-            if self.on_active_change:
-                self.on_active_change(True)
-        elif not active and self._is_streaming:
+        if active:
+            # 如果处于停止倒计时防抖中，立即取消停止定时器，保持无缝续播
+            if self._stop_timer is not None:
+                self._stop_timer.cancel()
+                self._stop_timer = None
+                log.info("[AirPlay 2] 会话在防抖宽限期内恢复活跃，取消断开，保持无缝播放")
+
+            if not self._is_streaming:
+                self._is_streaming = True
+                self._last_data_time = time.time()
+                if self.on_active_change:
+                    self.on_active_change(True)
+        else:
+            # 当收到 play_end 时，启动防抖宽限期（例如 2.5 秒）
+            # 避免 iOS 多房间重协商（如勾选 HomePod/切歌/快进）时的瞬间中断触发音箱停播
+            if self._is_streaming:
+                if self.stop_debounce_seconds > 0:
+                    if self._stop_timer is not None:
+                        self._stop_timer.cancel()
+                    log.info(f"[AirPlay 2] 收到停止事件，启动 {self.stop_debounce_seconds:.1f}s 防抖宽限期...")
+                    self._stop_timer = threading.Timer(
+                        self.stop_debounce_seconds, self._handle_debounce_timeout
+                    )
+                    self._stop_timer.daemon = True
+                    self._stop_timer.start()
+                else:
+                    self._is_streaming = False
+                    if self.on_active_change:
+                        self.on_active_change(False)
+
+    def _handle_debounce_timeout(self):
+        """防抖宽限期结束，确认无后续音频流，正式停止"""
+        self._stop_timer = None
+        if self._is_streaming:
+            log.info("[AirPlay 2] 防抖宽限期已过，确认停止音频流")
             self._is_streaming = False
             if self.on_active_change:
                 self.on_active_change(False)
@@ -262,6 +299,12 @@ class FIFOAudioBridge:
                         if not data:
                             continue
 
+                        # 侦测到实际音频流入：若正处于防抖等待，立即取消防抖
+                        if self._stop_timer is not None:
+                            self._stop_timer.cancel()
+                            self._stop_timer = None
+                            log.info("[AirPlay 2] 侦测到音频流流入，取消防抖停止定时器")
+
                         now = time.time()
                         if not self._first_data_time:
                             self._first_data_time = time.monotonic()
@@ -280,8 +323,8 @@ class FIFOAudioBridge:
                         # 写入 MiAir 音频流服务器
                         self.audio_stream_server.write_pcm(data)
                 else:
-                    # select 超时：检查静音/流中断
-                    if self._is_streaming:
+                    # select 超时：检查静音/流中断 (若已有防抖定时器运行，则由定时器统一决策)
+                    if self._is_streaming and self._stop_timer is None:
                         idle_time = time.time() - self._last_data_time
                         if idle_time > self.silence_timeout:
                             log.info(
@@ -327,6 +370,7 @@ class AirPlay2Server:
         prebuffer_ms: int = 0,
         sync_debug: bool = False,
         mock_mode: bool = False,
+        stop_debounce_seconds: float | None = None,
     ):
         self.hostname = hostname
         self.raw_device_name = device_name
@@ -352,6 +396,13 @@ class AirPlay2Server:
             self.prebuffer_ms = 0
 
         self.sync_debug = sync_debug or getattr(config, "airplay2_sync_debug", False)
+
+        if stop_debounce_seconds is not None:
+            self.stop_debounce_seconds = stop_debounce_seconds
+        elif config and hasattr(config, "airplay2_stop_debounce_seconds"):
+            self.stop_debounce_seconds = config.airplay2_stop_debounce_seconds
+        else:
+            self.stop_debounce_seconds = 2.5
 
         # 稳定 AirPlay 2 Device ID (Shairport 64-bit hex format e.g. 0x02AABBCCDDEEL)
         if airplay_device_id:
@@ -383,11 +434,14 @@ class AirPlay2Server:
             audio_fmt = config.airplay_audio_format
 
         # 复用 MiAir 现有 AudioStreamServer
+        # 注意：在 AirPlay 2 下，音频时序偏移由 Shairport Sync (audio_backend_latency_offset_in_seconds)
+        # 在 PTP 时钟层面直接提前输出调度，无需且严禁由 AudioStreamServer 再次截断丢帧 (否则会导致首段音频丢失且抵消提前量)。
+        # 因此 AudioStreamServer 的 latency_offset_ms 固定为 0。
         self.audio_stream_server = AudioStreamServer(
             hostname=self.hostname,
             port=0,
             audio_format=audio_fmt,
-            latency_offset_ms=self.latency_offset_ms,
+            latency_offset_ms=0,
             prebuffer_ms=self.prebuffer_ms,
             sync_debug=self.sync_debug,
         )
@@ -415,6 +469,7 @@ class AirPlay2Server:
             fifo_path=self.fifo_path,
             audio_stream_server=self.audio_stream_server,
             on_active_change=self._on_bridge_active_change,
+            stop_debounce_seconds=self.stop_debounce_seconds,
         )
         self._sps_proc: subprocess.Popen | None = None
         self._stdout_thread: threading.Thread | None = None
@@ -701,6 +756,9 @@ class AirPlay2Server:
             "fifo_first_data_time": self.bridge.first_data_time,
             "fifo_path": self.fifo_path,
             "conf_path": self.conf_path,
+            "latency_offset_ms": self.latency_offset_ms,
+            "prebuffer_ms": self.prebuffer_ms,
+            "stop_debounce_seconds": self.stop_debounce_seconds,
         })
         return stats
 

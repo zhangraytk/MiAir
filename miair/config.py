@@ -125,8 +125,9 @@ class Config:
     airplay_mode: str = "legacy"  # "legacy" (AirPlay 1) 或 "experimental" (AirPlay 2)
     airplay2_port: int = 7000
     airplay2_name_suffix: str = " [AP2]"
-    airplay2_latency_offset_ms: int = 0  # 负值提前输出，补偿音箱的固定播放延迟
-    airplay2_prebuffer_ms: int = 0  # 初始预缓冲毫秒数
+    airplay2_latency_offset_ms: int = 0  # 负值提前输出，补偿音箱的固定播放延迟 (常用 -2000 ~ -4500 ms)
+    airplay2_prebuffer_ms: int = 0  # 初始预缓冲毫秒数 (补偿延迟时建议保持 0)
+    airplay2_stop_debounce_seconds: float = 2.5  # 停止/切歌/多设备重协商防抖宽限期 (秒)
     airplay2_sync_debug: bool = False  # 是否启用多设备同步时间戳诊断
     speakers: dict = field(default_factory=dict)
 
@@ -140,8 +141,8 @@ class Config:
 
     def __post_init__(self):
         self.resume_delay_seconds = max(1, min(15, self.resume_delay_seconds))
-        self.airplay2_latency_offset_ms = max(-2000, min(2000, int(self.airplay2_latency_offset_ms)))
-        self.airplay2_prebuffer_ms = max(0, min(2000, int(self.airplay2_prebuffer_ms)))
+        self.airplay2_latency_offset_ms = max(-15000, min(5000, int(self.airplay2_latency_offset_ms)))
+        self.airplay2_prebuffer_ms = max(0, min(5000, int(self.airplay2_prebuffer_ms)))
         if not self.account:
             self.account = os.getenv("MI_USER", "")
         if not self.password:

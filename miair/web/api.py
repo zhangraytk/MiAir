@@ -281,9 +281,9 @@ def create_web_app(config: Config, app_instance) -> web.Application:
 
         if "airplay2_latency_offset_ms" in data:
             offset = data["airplay2_latency_offset_ms"]
-            if type(offset) is not int or not -2000 <= offset <= 2000:
+            if type(offset) is not int or not -15000 <= offset <= 5000:
                 return web.json_response(
-                    {"ok": False, "error": "AirPlay 2 延迟补偿必须为 -2000 到 2000 毫秒的整数"},
+                    {"ok": False, "error": "AirPlay 2 延迟补偿必须为 -15000 到 5000 毫秒的整数"},
                     status=400,
                 )
 
@@ -348,8 +348,13 @@ def create_web_app(config: Config, app_instance) -> web.Application:
             config.airplay2_latency_offset_ms = data["airplay2_latency_offset_ms"]
         if "airplay2_prebuffer_ms" in data:
             val = data["airplay2_prebuffer_ms"]
-            if type(val) is int and 0 <= val <= 2000:
+            if type(val) is int and 0 <= val <= 5000:
                 config.airplay2_prebuffer_ms = val
+        if "airplay2_stop_debounce_seconds" in data:
+            try:
+                config.airplay2_stop_debounce_seconds = float(data["airplay2_stop_debounce_seconds"])
+            except (ValueError, TypeError):
+                pass
         if "airplay2_sync_debug" in data:
             config.airplay2_sync_debug = bool(data["airplay2_sync_debug"])
 
@@ -367,11 +372,11 @@ def create_web_app(config: Config, app_instance) -> web.Application:
                         speaker.airplay2_port = val
                 if "airplay2_latency_offset_ms" in speaker_data:
                     val = speaker_data["airplay2_latency_offset_ms"]
-                    if type(val) is int and -2000 <= val <= 2000:
+                    if type(val) is int and -15000 <= val <= 5000:
                         speaker.airplay2_latency_offset_ms = val
                 if "airplay2_prebuffer_ms" in speaker_data:
                     val = speaker_data["airplay2_prebuffer_ms"]
-                    if type(val) is int and 0 <= val <= 2000:
+                    if type(val) is int and 0 <= val <= 5000:
                         speaker.airplay2_prebuffer_ms = val
                 if "airplay2_sync_debug" in speaker_data:
                     speaker.airplay2_sync_debug = bool(speaker_data["airplay2_sync_debug"])

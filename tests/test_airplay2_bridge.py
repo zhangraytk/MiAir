@@ -58,7 +58,15 @@ class TestAP2BridgeComponents(unittest.TestCase):
 
     def test_shairport_latency_offset_units_and_direction(self):
         conf_path = os.path.join(self.test_dir, "offset.conf")
-        for milliseconds, seconds in [(-2000, "-2.000"), (-250, "-0.250"), (350, "0.350"), (2000, "2.000")]:
+        for milliseconds, seconds in [
+            (-10000, "-10.000"),
+            (-4500, "-4.500"),
+            (-2000, "-2.000"),
+            (-250, "-0.250"),
+            (350, "0.350"),
+            (2000, "2.000"),
+            (5000, "5.000"),
+        ]:
             with self.subTest(milliseconds=milliseconds):
                 ShairportSyncConfig.generate(
                     conf_path, "Test", 7000, os.path.join(self.test_dir, "audio.pcm"),
@@ -133,6 +141,7 @@ class TestAirPlay2ServerNotifications(unittest.IsolatedAsyncioTestCase):
             temp_dir=self.test_dir,
             config=self.config,
             mock_mode=True,
+            stop_debounce_seconds=0.08,
         )
 
         self.play_started_urls = []
@@ -159,22 +168,56 @@ class TestAirPlay2ServerNotifications(unittest.IsolatedAsyncioTestCase):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         port = self.server._notify_port
         s.sendto(b"play_begin", ("127.0.0.1", port))
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.05)
 
         self.assertTrue(self.server.is_playing)
         self.assertEqual(len(self.play_started_urls), 1)
 
         # 发送音量事件
         s.sendto(b"volume -12.5", ("127.0.0.1", port))
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.05)
         self.assertEqual(len(self.volume_changes), 1)
         self.assertAlmostEqual(self.volume_changes[0], -12.5)
 
-        # 发送 play_end 事件
+        # 发送 play_end 事件，等待防抖宽限期 0.08s 结束
         s.sendto(b"play_end", ("127.0.0.1", port))
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.15)
         self.assertFalse(self.server.is_playing)
         self.assertEqual(self.play_stopped_calls, 1)
+
+        s.close()
+
+    async def test_stop_debounce_cancels_on_group_renegotiation(self):
+        """模拟原生 HomePod 后加入时 iOS 的瞬间暂停/重协商：
+        发送 play_end 后立即进入防抖，并在宽限期内收到恢复信号，
+        验证音箱保持播放状态，未触发 on_play_stop 断开连接。
+        """
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        port = self.server._notify_port
+
+        # 1. 启动播放
+        s.sendto(b"play_begin", ("127.0.0.1", port))
+        await asyncio.sleep(0.05)
+        self.assertTrue(self.server.is_playing)
+        self.assertEqual(len(self.play_started_urls), 1)
+
+        # 2. 模拟加入 HomePod 触发的短暂 play_end (组重协商)
+        s.sendto(b"play_end", ("127.0.0.1", port))
+        await asyncio.sleep(0.03)  # 小于 0.08s 防抖阈值
+
+        # 此时应仍在防抖宽限期中，仍保持 is_playing 为 True，且尚未调用 on_play_stop
+        self.assertTrue(self.server.is_playing)
+        self.assertEqual(self.play_stopped_calls, 0)
+
+        # 3. iOS 重协商完成，发送 play_begin 或继续推流
+        s.sendto(b"play_begin", ("127.0.0.1", port))
+        # 等待超过初始防抖期限
+        await asyncio.sleep(0.1)
+
+        # 验证防抖已成功被取消，未停止音箱，无缝保持播放
+        self.assertTrue(self.server.is_playing)
+        self.assertEqual(self.play_stopped_calls, 0)
+        self.assertEqual(len(self.play_started_urls), 1, "同一会话无需重复通知 play_url")
 
         s.close()
 
@@ -288,7 +331,7 @@ class TestWebAPIAirPlaySettings(unittest.IsolatedAsyncioTestCase):
         app = MagicMock(dlna_running=False, renderers=[])
         async with TestClient(TestServer(create_web_app(self.config, app))) as client:
             with patch("miair.web.api._restart_process") as restart:
-                for offset in (-2000, -250, 0, 350, 2000):
+                for offset in (-10000, -3500, -250, 0, 350, 4500):
                     with self.subTest(offset=offset):
                         response = await client.post("/api/setting", json={"airplay2_latency_offset_ms": offset})
                         self.assertEqual(response.status, 200)
@@ -297,7 +340,7 @@ class TestWebAPIAirPlaySettings(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual((await response.json())["airplay2_latency_offset_ms"], offset)
                         self.assertEqual(Config.load(self.test_dir).airplay2_latency_offset_ms, offset)
                 await asyncio.sleep(0)
-                self.assertEqual(restart.call_count, 5)
+                self.assertEqual(restart.call_count, 6)
 
     async def test_invalid_latency_does_not_change_or_save_config(self):
         from aiohttp.test_utils import TestClient, TestServer
@@ -306,7 +349,7 @@ class TestWebAPIAirPlaySettings(unittest.IsolatedAsyncioTestCase):
         app = MagicMock(dlna_running=False, renderers=[])
         async with TestClient(TestServer(create_web_app(self.config, app))) as client:
             with patch.object(self.config, "save") as save, patch("miair.web.api._restart_process") as restart:
-                for offset in (-2001, 2001, 1.5, "-250", None, True):
+                for offset in (-15001, 5001, 1.5, "-250", None, True):
                     with self.subTest(offset=offset):
                         response = await client.post("/api/setting", json={
                             "airplay2_latency_offset_ms": offset, "airplay_mode": "legacy",

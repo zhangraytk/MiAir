@@ -1,6 +1,6 @@
 name: "MiAir"
 description: "让小米小爱音箱支持 DLNA 与 AirPlay (含实验性 AirPlay 2) 网络流媒体播放"
-version: "1.1.4"
+version: "1.1.5"
 slug: "miair"
 url: "https://github.com/zhangraytk/MiAir"
 init: false
@@ -45,6 +45,7 @@ schema:
   dlna_port: "int?"
   web_port: "int?"
   airplay2_port: "int?"
+  airplay2_latency_offset_ms: "int?"
   airplay2_prebuffer_ms: "int?"
   airplay2_sync_debug: "bool?"
 options:
@@ -53,5 +54,6 @@ options:
   dlna_port: 8200
   web_port: 8300
   airplay2_port: 7000
+  airplay2_latency_offset_ms: 0
   airplay2_prebuffer_ms: 0
   airplay2_sync_debug: false

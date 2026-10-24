@@ -38,7 +38,7 @@ if os.path.exists(opts_file) and os.path.exists(conf_file):
         sync_keys = [
             "airplay_mode", "verbose", "dlna_port", "web_port",
             "account", "password", "mi_did", "hostname",
-            "airplay2_port", "airplay2_prebuffer_ms", "airplay2_sync_debug"
+            "airplay2_port", "airplay2_latency_offset_ms", "airplay2_prebuffer_ms", "airplay2_sync_debug"
         ]
         for k in sync_keys:
             if k in opts and opts[k] is not None and opts[k] != "":

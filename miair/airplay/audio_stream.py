@@ -339,9 +339,10 @@ class AudioStreamServer:
                         empty_streak = 0
                     except queue.Empty:
                         empty_streak += 1
-                        # 3 秒无数据写入静音保持连接
-                        if empty_streak > 100:
-                            self._timing["underflow_count"] += 1
+                        # 队列短时无数据（如切歌、HomePod 加入组协商、网络抖动）写入静音保持 HTTP 活跃与音箱缓冲区饱满
+                        if empty_streak > 15:
+                            if empty_streak == 16:
+                                self._timing["underflow_count"] += 1
                             silence = b'\x00' * (self._sample_rate * self._channels * self._sample_width // 50)
                             with data_lock:
                                 pending_data.append(silence)
@@ -516,7 +517,7 @@ class AudioStreamServer:
                         empty_streak = 0
                     except queue.Empty:
                         empty_streak += 1
-                        if empty_streak > 40:
+                        if empty_streak > 6:
                             silence = b'\x00' * (self._sample_rate * self._channels * self._sample_width // 50)
                             try:
                                 proc.stdin.write(silence)

@@ -144,6 +144,43 @@ class TestAP2LatencyCompensation(unittest.IsolatedAsyncioTestCase):
                 data = await resp.content.read(4096)
                 self.assertGreater(len(data), 0)
 
+    async def test_ap2_server_delegates_latency_offset_to_shairport_sync(self):
+        """测试 AirPlay2Server 将时钟偏移完全委托给 Shairport Sync PTP 调度：
+        AudioStreamServer 的 latency_offset_ms 必须为 0 (禁止下游截断丢帧)，
+        且生成的 Shairport 配置文件与 timing stats 准确反映宽量程补偿 (如 -3500ms -> -3.500s)。
+        """
+        import tempfile
+        import shutil
+        from miair.airplay.ap2_bridge import AirPlay2Server
+
+        test_dir = tempfile.mkdtemp(prefix="miair_latency_test_")
+        try:
+            server = AirPlay2Server(
+                hostname="127.0.0.1",
+                device_name="LivingRoom",
+                rtsp_port=7010,
+                temp_dir=test_dir,
+                latency_offset_ms=-3500,
+                mock_mode=True,
+            )
+            await server.start()
+
+            # 1. 验证 AudioStreamServer 不重复进行截断，采样无损透传
+            self.assertEqual(server.audio_stream_server.latency_offset_ms, 0)
+
+            # 2. 验证 Shairport 配置文件精确写入 -3.500s 宽时差调度
+            with open(server.conf_path, encoding="utf-8") as f:
+                content = f.read()
+                self.assertIn("audio_backend_latency_offset_in_seconds = -3.500;", content)
+
+            # 3. 验证统计观测准确报告配置值
+            stats = server.get_timing_stats()
+            self.assertEqual(stats["latency_offset_ms"], -3500)
+
+            await server.stop()
+        finally:
+            shutil.rmtree(test_dir, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()
