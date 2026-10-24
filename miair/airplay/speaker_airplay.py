@@ -46,33 +46,81 @@ class SpeakerAirPlay:
             server_started = False
 
             if mode == 'experimental':
+                from miair.airplay.ap2_bridge import AirPlay2Server
+                raw_port = getattr(self.speaker, "airplay2_port", 0)
+                if isinstance(raw_port, int) and raw_port > 0:
+                    rtsp_port = raw_port
+                elif self.config and hasattr(self.config, "allocate_airplay2_port") and hasattr(self.speaker, "did") and isinstance(self.speaker.did, str):
+                    rtsp_port = self.config.allocate_airplay2_port(self.speaker.did)
+                else:
+                    rtsp_port = getattr(self.config, "airplay2_port", 7000) if self.config else 7000
+                    if not isinstance(rtsp_port, int):
+                        rtsp_port = 7000
+
+                if hasattr(self.speaker, "get_shairport_device_id") and callable(self.speaker.get_shairport_device_id):
+                    airplay_device_id = self.speaker.get_shairport_device_id()
+                else:
+                    airplay_device_id = ""
+
+                raw_offset = getattr(self.speaker, "airplay2_latency_offset_ms", 0)
+                if isinstance(raw_offset, (int, float)):
+                    latency_offset_ms = int(raw_offset)
+                else:
+                    cfg_offset = getattr(self.config, "airplay2_latency_offset_ms", 0)
+                    latency_offset_ms = int(cfg_offset) if isinstance(cfg_offset, (int, float)) else 0
+
+                raw_prebuf = getattr(self.speaker, "airplay2_prebuffer_ms", 0)
+                if isinstance(raw_prebuf, (int, float)):
+                    prebuffer_ms = int(raw_prebuf)
+                else:
+                    cfg_prebuf = getattr(self.config, "airplay2_prebuffer_ms", 0)
+                    prebuffer_ms = int(cfg_prebuf) if isinstance(cfg_prebuf, (int, float)) else 0
+
+                raw_debug = getattr(self.speaker, "airplay2_sync_debug", False)
+                if isinstance(raw_debug, bool):
+                    sync_debug = raw_debug
+                else:
+                    cfg_debug = getattr(self.config, "airplay2_sync_debug", False)
+                    sync_debug = bool(cfg_debug) if isinstance(cfg_debug, bool) else False
+
+                mock_mode = getattr(self.config, "airplay2_mock_mode", False)
+
+                did_str = getattr(self.speaker, "did", "")
+                if not isinstance(did_str, str):
+                    did_str = ""
+
+                log.info(f"[{self.device_name}] 正在以 AirPlay 2 实验模式启动 (RTSP端口={rtsp_port}, DeviceID={airplay_device_id})...")
+                self.airplay_server = AirPlay2Server(
+                    hostname=self.hostname,
+                    device_name=self.device_name,
+                    did=did_str,
+                    speaker_hardware=getattr(self.speaker, "hardware", ""),
+                    rtsp_port=rtsp_port,
+                    airplay_device_id=airplay_device_id,
+                    latency_offset_ms=latency_offset_ms,
+                    prebuffer_ms=prebuffer_ms,
+                    sync_debug=sync_debug,
+                    mock_mode=mock_mode,
+                    config=self.config,
+                )
+                self.airplay_server.on_play_start = self._on_play_start
+                self.airplay_server.on_play_stop = self._on_play_stop
+                self.airplay_server.on_volume_change = self._on_volume_change
                 try:
-                    from miair.airplay.ap2_bridge import AirPlay2Server
-                    rtsp_port = getattr(self.config, 'airplay2_port', 7000)
-                    log.info(f"[{self.device_name}] 正在尝试以 AirPlay 2 实验模式启动...")
-                    self.airplay_server = AirPlay2Server(
-                        hostname=self.hostname,
-                        device_name=self.device_name,
-                        speaker_hardware=self.speaker.hardware,
-                        rtsp_port=rtsp_port,
-                        config=self.config
-                    )
-                    self.airplay_server.on_play_start = self._on_play_start
-                    self.airplay_server.on_play_stop = self._on_play_stop
-                    self.airplay_server.on_volume_change = self._on_volume_change
                     await self.airplay_server.start()
                     server_started = True
                     log.info(f"音箱 {self.device_name} 的 AirPlay 2 实验服务已启动，RTSP 端口: {self.airplay_server.rtsp_port}")
                 except Exception as e:
-                    log.warning(f"[{self.device_name}] 启动 AirPlay 2 实验模式失败: {e}，自动回退到 AirPlay 1 传统模式")
+                    log.error(f"[{self.device_name}] 启动 AirPlay 2 实验模式失败: {e}")
                     if self.airplay_server:
                         try:
                             await self.airplay_server.stop()
                         except Exception as stop_err:
                             log.debug(f"清理失败的 AirPlay 2 实例异常: {stop_err}")
                     self.airplay_server = None
-
-            if not server_started:
+                    # 实验模式测试期间禁止静默回退到 AirPlay 1，以免产生假阳性
+                    raise
+            else:
                 self.airplay_server = AirPlayServer(
                     self.hostname, self.device_name, self.shared_zeroconf,
                     speaker_hardware=self.speaker.hardware
@@ -81,6 +129,7 @@ class SpeakerAirPlay:
                 self.airplay_server.on_play_stop = self._on_play_stop
                 self.airplay_server.on_volume_change = self._on_volume_change
                 await self.airplay_server.start()
+                server_started = True
                 log.info(f"音箱 {self.device_name} 的 AirPlay 1 服务已启动，端口: {self.airplay_server.rtsp_port}")
         except Exception as e:
             log.error(f"启动音箱 {self.device_name} 的 AirPlay 服务失败: {e}")
@@ -100,6 +149,13 @@ class SpeakerAirPlay:
             await self.airplay_server.stop()
             self.airplay_server = None
             log.info(f"音箱 {self.device_name} 的 AirPlay 服务已停止")
+
+    @property
+    def timing_stats(self) -> dict:
+        """获取该音箱接收器的同步时序观测指标"""
+        if self.airplay_server and hasattr(self.airplay_server, "get_timing_stats"):
+            return self.airplay_server.get_timing_stats()
+        return {}
 
     def _on_play_start(self, stream_url: str):
         """AirPlay 开始播放 - 直接推送到这个音箱
@@ -346,3 +402,42 @@ class AirPlayManager:
         """重新为音箱启动 AirPlay 服务"""
         await self.stop()
         await self.start_for_speakers(controllers)
+
+    async def restart_speaker(self, did: str, controller: SpeakerController) -> bool:
+        """独立重启单个音箱的 AirPlay 服务实例，不影响其他正在播放的音箱"""
+        existing = self.speaker_airplays.pop(did, None)
+        if existing:
+            try:
+                await existing.stop()
+            except Exception as e:
+                log.warning(f"停止音箱 {did} 的 AirPlay 服务异常: {e}")
+
+        try:
+            speaker_airplay = SpeakerAirPlay(
+                self.hostname, controller, self._shared_zeroconf, config=self.config
+            )
+            await speaker_airplay.start()
+            self.speaker_airplays[did] = speaker_airplay
+            log.info(f"音箱 {controller.speaker.get_dlna_name()} (did={did}) 的 AirPlay 服务已成功独立重启")
+            return True
+        except Exception as e:
+            log.error(f"独立重启音箱 {did} 的 AirPlay 失败: {e}")
+            return False
+
+    def get_speaker_status(self, did: str) -> dict:
+        """获取指定音箱的 AirPlay 实例与同步状态"""
+        sap = self.speaker_airplays.get(did)
+        if not sap or not sap.airplay_server:
+            return {"running": False, "mode": getattr(self.config, "airplay_mode", "legacy")}
+        mode = getattr(self.config, "airplay_mode", "legacy")
+        stats = {
+            "running": True,
+            "mode": mode,
+            "device_name": sap.device_name,
+            "is_playing": sap.airplay_server.is_playing,
+            "client_name": sap.airplay_server.client_name,
+            "rtsp_port": sap.airplay_server.rtsp_port,
+        }
+        if hasattr(sap.airplay_server, "get_timing_stats"):
+            stats.update(sap.airplay_server.get_timing_stats())
+        return stats

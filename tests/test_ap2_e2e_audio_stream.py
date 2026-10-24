@@ -23,6 +23,7 @@ class TestAirPlay2E2EAudioStream(unittest.IsolatedAsyncioTestCase):
             rtsp_port=7008,
             temp_dir=self.test_dir,
             config=self.config,
+            mock_mode=True,
         )
 
         self.started_url = ""

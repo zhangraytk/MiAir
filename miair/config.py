@@ -28,9 +28,36 @@ class Speaker:
     use_music_api: bool = False
     compatibility_mode: bool | None = None
     enabled: bool = True
+    # AirPlay 2 独立实例与多设备同步配置
+    airplay2_port: int = 0
+    airplay_device_id: str = ""
+    airplay2_latency_offset_ms: int = 0
+    airplay2_prebuffer_ms: int = 0
+    airplay2_sync_debug: bool = False
+    airplay2_enabled: bool = True
 
     # 不支持无损格式的音箱型号列表
     _NON_LOSSLESS_HARDWARE = {"L05B", "L05C", "LX06", "L16A"}
+
+    def get_airplay_mac(self) -> str:
+        """获取或基于 did 稳定派生 Locally Administered Unicast MAC 地址"""
+        if self.airplay_device_id and ":" in self.airplay_device_id and len(self.airplay_device_id) == 17:
+            return self.airplay_device_id.lower()
+        import hashlib
+        raw = self.did or self.device_id or self.name or "speaker"
+        digest = hashlib.sha256(raw.encode("utf-8")).digest()
+        # Locally administered (bit 1 = 1), Unicast (bit 0 = 0)
+        b0 = (digest[0] & 0xFE) | 0x02
+        mac_bytes = bytes([b0]) + digest[1:6]
+        return ":".join(f"{b:02x}" for b in mac_bytes)
+
+    def get_shairport_device_id(self) -> str:
+        """返回 Shairport Sync 配置文件所需的 64-bit 16 进制字面量 (如 0x021122334455L)"""
+        if self.airplay_device_id and self.airplay_device_id.startswith("0x") and self.airplay_device_id.endswith("L"):
+            return self.airplay_device_id
+        mac = self.get_airplay_mac()
+        clean = mac.replace(":", "").upper()
+        return f"0x{clean}L"
 
     def is_compatibility_mode(self) -> bool:
         if self.compatibility_mode is not None:
@@ -98,6 +125,9 @@ class Config:
     airplay_mode: str = "legacy"  # "legacy" (AirPlay 1) 或 "experimental" (AirPlay 2)
     airplay2_port: int = 7000
     airplay2_name_suffix: str = " [AP2]"
+    airplay2_latency_offset_ms: int = 0  # 负值提前输出，补偿音箱的固定播放延迟
+    airplay2_prebuffer_ms: int = 0  # 初始预缓冲毫秒数
+    airplay2_sync_debug: bool = False  # 是否启用多设备同步时间戳诊断
     speakers: dict = field(default_factory=dict)
 
     # 保存配置的线程锁（类级别共享）
@@ -110,6 +140,8 @@ class Config:
 
     def __post_init__(self):
         self.resume_delay_seconds = max(1, min(15, self.resume_delay_seconds))
+        self.airplay2_latency_offset_ms = max(-2000, min(2000, int(self.airplay2_latency_offset_ms)))
+        self.airplay2_prebuffer_ms = max(0, min(2000, int(self.airplay2_prebuffer_ms)))
         if not self.account:
             self.account = os.getenv("MI_USER", "")
         if not self.password:
@@ -318,6 +350,31 @@ class Config:
             self.speakers[did] = speaker
         speaker.ensure_udn()
         return speaker
+
+    def allocate_airplay2_port(self, did: str) -> int:
+        """为指定音箱分配持久且唯一的 RTSP 端口，避免多实例冲突"""
+        speaker = self.get_speaker(did)
+        if speaker.airplay2_port > 0:
+            return speaker.airplay2_port
+
+        base_port = self.airplay2_port or 7000
+        used_ports = set()
+        for s_did, s in self.speakers.items():
+            if s_did == did:
+                continue
+            if isinstance(s, Speaker) and s.airplay2_port > 0:
+                used_ports.add(s.airplay2_port)
+            elif isinstance(s, dict) and s.get("airplay2_port", 0) > 0:
+                used_ports.add(s["airplay2_port"])
+
+        candidate = base_port
+        while candidate in used_ports:
+            candidate += 1
+
+        speaker.airplay2_port = candidate
+        self.save()
+        log.info(f"为音箱 {speaker.get_dlna_name()} (did={did}) 自动分配持久 AirPlay 2 RTSP 端口: {candidate}")
+        return candidate
 
     def get_enabled_speakers(self) -> list[Speaker]:
         """获取所有已启用的 Speaker"""

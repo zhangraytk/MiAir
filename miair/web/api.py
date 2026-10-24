@@ -240,6 +240,9 @@ def create_web_app(config: Config, app_instance) -> web.Application:
             "auto_restart": config.auto_restart,
             "airplay_mode": config.airplay_mode,
             "airplay2_port": config.airplay2_port,
+            "airplay2_latency_offset_ms": config.airplay2_latency_offset_ms,
+            "airplay2_prebuffer_ms": config.airplay2_prebuffer_ms,
+            "airplay2_sync_debug": config.airplay2_sync_debug,
         }
 
         # 返回已配置的 speakers 信息
@@ -253,6 +256,13 @@ def create_web_app(config: Config, app_instance) -> web.Application:
                 "hardware": speaker.hardware,
                 "enabled": speaker.enabled,
                 "compatibility_mode": speaker.is_compatibility_mode(),
+                "airplay2_port": speaker.airplay2_port,
+                "airplay_device_id": speaker.get_shairport_device_id(),
+                "airplay_mac": speaker.get_airplay_mac(),
+                "airplay2_latency_offset_ms": speaker.airplay2_latency_offset_ms,
+                "airplay2_prebuffer_ms": speaker.airplay2_prebuffer_ms,
+                "airplay2_sync_debug": speaker.airplay2_sync_debug,
+                "airplay2_enabled": speaker.airplay2_enabled,
             }
         data["speakers"] = speakers_info
 
@@ -268,6 +278,14 @@ def create_web_app(config: Config, app_instance) -> web.Application:
     async def handle_save_setting(request):
         """保存设置 (账号、密码、cookie、选中的设备)"""
         data = await request.json()
+
+        if "airplay2_latency_offset_ms" in data:
+            offset = data["airplay2_latency_offset_ms"]
+            if type(offset) is not int or not -2000 <= offset <= 2000:
+                return web.json_response(
+                    {"ok": False, "error": "AirPlay 2 延迟补偿必须为 -2000 到 2000 毫秒的整数"},
+                    status=400,
+                )
 
         # 清空账号与凭据
         if data.get("clear_account"):
@@ -326,8 +344,16 @@ def create_web_app(config: Config, app_instance) -> web.Application:
             config.airplay_mode = data["airplay_mode"]
         if "airplay2_port" in data:
             config.airplay2_port = int(data["airplay2_port"])
+        if "airplay2_latency_offset_ms" in data:
+            config.airplay2_latency_offset_ms = data["airplay2_latency_offset_ms"]
+        if "airplay2_prebuffer_ms" in data:
+            val = data["airplay2_prebuffer_ms"]
+            if type(val) is int and 0 <= val <= 2000:
+                config.airplay2_prebuffer_ms = val
+        if "airplay2_sync_debug" in data:
+            config.airplay2_sync_debug = bool(data["airplay2_sync_debug"])
 
-        # 更新 speaker 名称和兼容模式
+        # 更新 speaker 名称、兼容模式与独立 AirPlay 2 参数
         if "speakers" in data:
             for did, speaker_data in data["speakers"].items():
                 speaker = config.get_speaker(did)
@@ -335,6 +361,22 @@ def create_web_app(config: Config, app_instance) -> web.Application:
                     speaker.dlna_name = speaker_data["dlna_name"]
                 if "compatibility_mode" in speaker_data:
                     speaker.compatibility_mode = speaker_data["compatibility_mode"]
+                if "airplay2_port" in speaker_data:
+                    val = speaker_data["airplay2_port"]
+                    if type(val) is int and 0 <= val <= 65535:
+                        speaker.airplay2_port = val
+                if "airplay2_latency_offset_ms" in speaker_data:
+                    val = speaker_data["airplay2_latency_offset_ms"]
+                    if type(val) is int and -2000 <= val <= 2000:
+                        speaker.airplay2_latency_offset_ms = val
+                if "airplay2_prebuffer_ms" in speaker_data:
+                    val = speaker_data["airplay2_prebuffer_ms"]
+                    if type(val) is int and 0 <= val <= 2000:
+                        speaker.airplay2_prebuffer_ms = val
+                if "airplay2_sync_debug" in speaker_data:
+                    speaker.airplay2_sync_debug = bool(speaker_data["airplay2_sync_debug"])
+                if "airplay2_enabled" in speaker_data:
+                    speaker.airplay2_enabled = bool(speaker_data["airplay2_enabled"])
 
         config.save()
 
@@ -369,7 +411,7 @@ def create_web_app(config: Config, app_instance) -> web.Application:
             )
 
     async def handle_get_speakers(request):
-        """获取当前运行中的渲染器状态"""
+        """获取当前运行中的渲染器状态与 AirPlay 2 实例信息"""
         speakers_info = []
         for did, controller in app_instance.speaker_manager.controllers.items():
             speaker = controller.speaker
@@ -381,12 +423,19 @@ def create_web_app(config: Config, app_instance) -> web.Application:
             # 获取 AirPlay 状态
             airplay_active = False
             airplay_client = ""
+            timing_stats = {}
+            airplay_instance_status = "stopped"
+            airplay_port = getattr(speaker, "airplay2_port", 0)
             if app_instance.airplay_manager:
                 sap = app_instance.airplay_manager.speaker_airplays.get(did)
                 if sap and sap.airplay_server:
+                    airplay_instance_status = "running"
+                    airplay_port = sap.airplay_server.rtsp_port
                     if sap.airplay_server.is_playing:
                         airplay_active = True
                         airplay_client = sap.airplay_server.client_name
+                    if hasattr(sap, "timing_stats"):
+                        timing_stats = sap.timing_stats
 
             speakers_info.append({
                 "did": did,
@@ -397,10 +446,30 @@ def create_web_app(config: Config, app_instance) -> web.Application:
                 "udn": speaker.udn,
                 "transport_state": transport_state,
                 "current_uri": current_uri,
+                "airplay_mode": config.airplay_mode,
                 "airplay_active": airplay_active,
                 "airplay_client": airplay_client,
+                "airplay2_port": airplay_port,
+                "airplay_device_id": speaker.get_shairport_device_id(),
+                "airplay_instance_status": airplay_instance_status,
+                "airplay2_latency_offset_ms": speaker.airplay2_latency_offset_ms,
+                "airplay2_prebuffer_ms": speaker.airplay2_prebuffer_ms,
+                "airplay2_sync_debug": speaker.airplay2_sync_debug,
+                "airplay2_enabled": speaker.airplay2_enabled,
+                "timing_stats": timing_stats,
             })
         return web.json_response(speakers_info)
+
+    async def handle_restart_speaker_airplay(request):
+        """独立重启单个音箱的 AirPlay 服务"""
+        did = request.match_info["did"]
+        controller = app_instance.speaker_manager.controllers.get(did)
+        if not controller:
+            return web.json_response({"ok": False, "error": f"音箱未找到: {did}"}, status=404)
+        if not app_instance.airplay_manager:
+            return web.json_response({"ok": False, "error": "AirPlay 管理服务未运行"}, status=400)
+        success = await app_instance.airplay_manager.restart_speaker(did, controller)
+        return web.json_response({"ok": success})
 
     async def handle_rename_speaker(request):
         """重命名音箱的 DLNA 名称"""
@@ -520,6 +589,7 @@ def create_web_app(config: Config, app_instance) -> web.Application:
     web_app.router.add_get("/api/devices", handle_get_devices)
     web_app.router.add_get("/api/speakers", handle_get_speakers)
     web_app.router.add_post("/api/speakers/{did}/rename", handle_rename_speaker)
+    web_app.router.add_post("/api/speakers/{did}/restart_airplay", handle_restart_speaker_airplay)
     web_app.router.add_get("/api/status", handle_status)
     web_app.router.add_post("/api/update", handle_execute_update)
 

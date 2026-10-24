@@ -15,5 +15,9 @@
     "enable_voice_control": false,
     "voice_poll_interval": 1,
     "airplay_mode": "legacy",
+    "airplay2_port": 7000,
+    "airplay2_latency_offset_ms": 0,
+    "airplay2_prebuffer_ms": 0,
+    "airplay2_sync_debug": false,
     "speakers": {}
 }

@@ -103,6 +103,6 @@ RUN chmod +x /run.sh
 
 RUN mkdir -p /app/conf
 
-EXPOSE 8200 8300 7000 5353/udp 1900/udp 319/udp 320/udp
+EXPOSE 8200 8300 7000-7010 5353/udp 1900/udp 319/udp 320/udp
 
 ENTRYPOINT ["/run.sh"]

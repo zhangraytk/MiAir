@@ -97,7 +97,7 @@ COPY miair/ ./miair/
 COPY haos-addon/run.sh /run.sh
 RUN chmod +x /run.sh
 
-# 暴露端口：8300 (Web UI), 8200 (DLNA), 7000 (AirPlay 2 RTSP)
-EXPOSE 8300 8200 7000 5353/udp 1900/udp 319/udp 320/udp
+# 暴露端口：8300 (Web UI), 8200 (DLNA), 7000-7010 (多实例 AirPlay 2 RTSP)
+EXPOSE 8300 8200 7000-7010 5353/udp 1900/udp 319/udp 320/udp
 
 ENTRYPOINT ["/run.sh"]

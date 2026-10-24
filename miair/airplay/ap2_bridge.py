@@ -48,6 +48,9 @@ class ShairportSyncConfig:
         notify_port: int,
         python_bin: str = sys.executable,
         mdns_backend: str = "avahi",
+        latency_offset_ms: int = 0,
+        airplay_device_id: str = "",
+        airplay_device_id_offset: int | None = None,
     ) -> str:
         """生成并写入 shairport-sync.conf"""
         # 构造通知命令
@@ -68,11 +71,23 @@ class ShairportSyncConfig:
         dev_name_esc = device_name.replace("\\", "\\\\").replace('"', '\\"')
         fifo_path_esc = fifo_path.replace("\\", "\\\\").replace('"', '\\"')
 
+        device_id_entry = ""
+        if airplay_device_id:
+            device_id_entry = f"    airplay_device_id = {airplay_device_id};\n"
+        elif airplay_device_id_offset is not None:
+            device_id_entry = f"    airplay_device_id_offset = {airplay_device_id_offset};\n"
+
+        try:
+            sec_offset = float(latency_offset_ms) / 1000.0
+        except (TypeError, ValueError):
+            sec_offset = 0.0
+
         content = f"""// MiAir 自动生成的 Shairport Sync AirPlay 2 配置文件
 general = {{
     name = "{dev_name_esc}";
     output_backend = "pipe";
     port = {rtsp_port};
+{device_id_entry}    audio_backend_latency_offset_in_seconds = {sec_offset:.3f};
     run_this_when_volume_is_set = "{cmd_vol}";
     mdns_backend = "{mdns_backend}";
 }};
@@ -132,6 +147,7 @@ class FIFOAudioBridge:
         self._fifo_fd: int | None = None
         self._is_streaming = False
         self._last_data_time = 0.0
+        self._first_data_time = 0.0
         self._total_bytes_read = 0
         self._leftover = b""
 
@@ -142,6 +158,10 @@ class FIFOAudioBridge:
     @property
     def total_bytes_read(self) -> int:
         return self._total_bytes_read
+
+    @property
+    def first_data_time(self) -> float:
+        return self._first_data_time
 
     def setup_fifo(self):
         """创建 FIFO 文件"""
@@ -243,6 +263,8 @@ class FIFOAudioBridge:
                             continue
 
                         now = time.time()
+                        if not self._first_data_time:
+                            self._first_data_time = time.monotonic()
                         self._last_data_time = now
                         self._total_bytes_read += len(data)
 
@@ -299,12 +321,48 @@ class AirPlay2Server:
         rtsp_port: int = 7000,
         temp_dir: str = "",
         config=None,
+        did: str = "",
+        airplay_device_id: str = "",
+        latency_offset_ms: int = 0,
+        prebuffer_ms: int = 0,
+        sync_debug: bool = False,
+        mock_mode: bool = False,
     ):
         self.hostname = hostname
         self.raw_device_name = device_name
         self.speaker_hardware = speaker_hardware
         self.rtsp_port = rtsp_port
         self.config = config
+        self.did = did or sanitize_filename(device_name)
+        self.mock_mode = mock_mode
+
+        # 每设备独立延迟与调试参数 (优先使用入参，其次配置 fallback)
+        if latency_offset_ms != 0:
+            self.latency_offset_ms = latency_offset_ms
+        elif config and hasattr(config, "airplay2_latency_offset_ms"):
+            self.latency_offset_ms = config.airplay2_latency_offset_ms
+        else:
+            self.latency_offset_ms = 0
+
+        if prebuffer_ms != 0:
+            self.prebuffer_ms = prebuffer_ms
+        elif config and hasattr(config, "airplay2_prebuffer_ms"):
+            self.prebuffer_ms = config.airplay2_prebuffer_ms
+        else:
+            self.prebuffer_ms = 0
+
+        self.sync_debug = sync_debug or getattr(config, "airplay2_sync_debug", False)
+
+        # 稳定 AirPlay 2 Device ID (Shairport 64-bit hex format e.g. 0x02AABBCCDDEEL)
+        if airplay_device_id:
+            self.airplay_device_id = airplay_device_id
+        else:
+            import hashlib
+            raw_id = self.did or device_name
+            digest = hashlib.sha256(raw_id.encode("utf-8")).digest()
+            b0 = (digest[0] & 0xFE) | 0x02
+            mac_clean = f"{b0:02X}" + digest[1:6].hex().upper()
+            self.airplay_device_id = f"0x{mac_clean}L"
 
         # 设备广播名增加标识，避免与现有 AirPlay 1 重名冲突
         suffix = " [AP2]"
@@ -312,11 +370,11 @@ class AirPlay2Server:
             suffix = config.airplay2_name_suffix
         self.device_name = f"{device_name}{suffix}"
 
-        # 临时工作目录
+        # 临时工作目录及基于 did 的严格文件隔离
         self.work_dir = temp_dir or tempfile.gettempdir()
-        safe_name = sanitize_filename(device_name)
-        self.fifo_path = os.path.join(self.work_dir, f"miair_ap2_{safe_name}.pcm")
-        self.conf_path = os.path.join(self.work_dir, f"miair_sps_{safe_name}.conf")
+        safe_did = sanitize_filename(self.did)
+        self.fifo_path = os.path.join(self.work_dir, f"miair_ap2_{safe_did}.pcm")
+        self.conf_path = os.path.join(self.work_dir, f"miair_sps_{safe_did}.conf")
 
         # 音频格式选择：统一使用无损标准 WAV 输出（零编码延迟、音质无损）
         # 兼容小爱所有音箱（包含 Play/Play增强版/Pro），避免 ffmpeg 转码延迟与失真
@@ -326,7 +384,12 @@ class AirPlay2Server:
 
         # 复用 MiAir 现有 AudioStreamServer
         self.audio_stream_server = AudioStreamServer(
-            hostname=self.hostname, port=0, audio_format=audio_fmt
+            hostname=self.hostname,
+            port=0,
+            audio_format=audio_fmt,
+            latency_offset_ms=self.latency_offset_ms,
+            prebuffer_ms=self.prebuffer_ms,
+            sync_debug=self.sync_debug,
         )
         self.audio_stream_server.set_audio_params(
             sample_rate=44100, channels=2, sample_width=2
@@ -344,6 +407,8 @@ class AirPlay2Server:
         self._notify_port: int = 0
         self._notify_thread: threading.Thread | None = None
         self._running = False
+        self._broadcast_status = "unregistered"
+        self._port_listening = False
 
         # FIFO 桥接与 Shairport Sync 进程
         self.bridge = FIFOAudioBridge(
@@ -355,6 +420,11 @@ class AirPlay2Server:
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
         self._stderr_lines: list[str] = []
+        self._running: bool = False
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
 
     @property
     def is_playing(self) -> bool:
@@ -386,6 +456,8 @@ class AirPlay2Server:
             fifo_path=self.fifo_path,
             notify_port=self._notify_port,
             mdns_backend=mdns_backend,
+            latency_offset_ms=self.latency_offset_ms,
+            airplay_device_id=self.airplay_device_id,
         )
 
         # 5. 确保 NQPTP 运行 (Linux) 并启动 Shairport Sync
@@ -394,6 +466,7 @@ class AirPlay2Server:
 
         log.info(f"[AirPlay 2] 服务已就绪: {self.device_name}")
         log.info(f"[AirPlay 2]   RTSP 端口: {self.rtsp_port}")
+        log.info(f"[AirPlay 2]   AirPlay Device ID: {self.airplay_device_id}")
         log.info(f"[AirPlay 2]   音频流: {self.stream_url}")
 
     async def stop(self):
@@ -518,9 +591,16 @@ class AirPlay2Server:
         """启动 Shairport Sync 进程（如果系统已安装）"""
         sps_bin = shutil.which("shairport-sync")
         if not sps_bin:
+            if not self.mock_mode:
+                err_msg = (
+                    f"[{self.device_name}] 系统未找到 shairport-sync 可执行文件，无法以 AirPlay 2 实验模式启动。"
+                    "请确认运行环境中已安装 Shairport Sync (支持 AirPlay 2) 或使用官方 Docker/HAOS 镜像。"
+                )
+                log.error(f"[AirPlay 2] {err_msg}")
+                raise RuntimeError(err_msg)
+            self._broadcast_status = "mock"
             log.warning(
-                "[AirPlay 2] 系统未找到 shairport-sync 可执行文件。"
-                "当前处于模拟桥接模式（可用于本地测试或等待外部进程接入）。"
+                f"[AirPlay 2] 系统未找到 shairport-sync 可执行文件。当前处于模拟桥接模式（did={self.did}）。"
             )
             return
 
@@ -586,6 +666,43 @@ class AirPlay2Server:
             err_msg = f"Shairport Sync 进程启动后立即退出 (代码: {poll_code}): {err_detail}"
             log.error(f"[AirPlay 2] {err_msg}")
             raise RuntimeError(err_msg)
+
+        # 验证 RTSP 端口是否正常监听
+        port_open = False
+        for _ in range(10):
+            try:
+                s = socket.create_connection(("127.0.0.1", self.rtsp_port), timeout=0.2)
+                s.close()
+                port_open = True
+                break
+            except OSError:
+                time.sleep(0.2)
+        self._port_listening = port_open
+        if not port_open:
+            log.warning(f"[AirPlay 2] [{self.device_name}] RTSP 端口 {self.rtsp_port} 监听等待超时")
+        else:
+            self._broadcast_status = "registered"
+            log.info(f"[AirPlay 2] [{self.device_name}] RTSP 端口 {self.rtsp_port} 监听正常并就绪")
+
+    def get_timing_stats(self) -> dict:
+        """获取综合时钟同步与缓冲时序统计"""
+        stats = self.audio_stream_server.get_timing_stats()
+        stats.update({
+            "did": self.did,
+            "device_name": self.device_name,
+            "rtsp_port": self.rtsp_port,
+            "airplay_device_id": self.airplay_device_id,
+            "shairport_pid": self._sps_proc.pid if self._sps_proc and self._sps_proc.poll() is None else None,
+            "shairport_running": bool(self._sps_proc and self._sps_proc.poll() is None),
+            "port_listening": self._port_listening,
+            "broadcast_status": self._broadcast_status,
+            "mock_mode": self.mock_mode,
+            "fifo_bytes_read": self.bridge.total_bytes_read,
+            "fifo_first_data_time": self.bridge.first_data_time,
+            "fifo_path": self.fifo_path,
+            "conf_path": self.conf_path,
+        })
+        return stats
 
     # ============================================================
     # 模拟与测试辅助方法

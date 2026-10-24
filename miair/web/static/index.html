@@ -632,6 +632,49 @@
             border: 1px solid rgba(168, 85, 247, 0.3);
         }
 
+        .badge-status-running {
+            background: var(--green-dim);
+            color: var(--green);
+            border: 1px solid rgba(16, 185, 129, 0.3);
+        }
+
+        .badge-status-stopped {
+            background: var(--red-dim);
+            color: var(--red);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+
+        .btn-xs {
+            padding: 3px 8px;
+            font-size: 11px;
+            font-weight: 500;
+            border-radius: var(--radius-sm);
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid var(--border);
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-xs:hover {
+            background: rgba(255, 255, 255, 0.16);
+            color: var(--text);
+            border-color: var(--border-hover);
+        }
+
+        .spk-debug-box {
+            margin-top: 8px;
+            padding: 10px 12px;
+            background: rgba(0, 0, 0, 0.28);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            font-size: 11px;
+            color: var(--text-secondary);
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 6px 14px;
+        }
+
         .speaker-meta {
             font-size: 12px;
             color: var(--text-secondary);
@@ -1227,12 +1270,42 @@
 
                     <div class="form-group" style="margin-top: 16px;">
                         <label class="form-label">AirPlay 接收模式</label>
-                        <select class="form-input" id="select-airplay-mode">
+                        <select class="form-input" id="select-airplay-mode" onchange="toggleAirPlayLatency()">
                             <option value="legacy">经典模式 (AirPlay 1 / RAOP，默认)</option>
                             <option value="experimental">实验模式 (Shairport Sync AirPlay 2)</option>
                         </select>
                         <div class="help-block" style="margin-top: 4px; font-size: 11px; color: var(--text-muted);">
-                            实验模式采用 Shairport Sync + NQPTP，支持多房间同步与缓冲流。当环境缺少依赖时自动回退至经典模式。
+                            实验模式采用 Shairport Sync + NQPTP 接收缓冲流，小爱音箱的播放时差可尝试下方手动补偿。
+                        </div>
+                    </div>
+                    <div class="form-group" id="div-airplay2-latency" style="margin-top: 16px;" hidden>
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                            <label class="form-label" for="input-airplay2-latency">全局 AirPlay 2 延迟补偿</label>
+                            <output id="airplay2-latency-display" for="input-airplay2-latency" aria-live="polite">0 ms</output>
+                        </div>
+                        <input type="range" id="input-airplay2-latency" min="-2000" max="2000" step="10" value="0"
+                            style="width: 100%; accent-color: var(--accent); cursor: pointer;"
+                            aria-describedby="airplay2-latency-help" oninput="updateAirPlayLatencyDisplay()">
+                        <div style="display: flex; justify-content: space-between; font-size: 11px; color: var(--text-muted);">
+                            <span>提前 2000 ms</span><span>0</span><span>延后 2000 ms</span>
+                        </div>
+                        <div id="airplay2-latency-help" class="help-block" style="margin-top: 8px; font-size: 11px; color: var(--text-muted);">
+                            小米比原生 AirPlay 设备慢时往左调，可先试 -100～-300 ms。若左侧音箱列表未单独配置，则采用此全局默认值。
+                        </div>
+
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 16px;">
+                            <label class="form-label" for="input-airplay2-prebuffer" style="margin-bottom: 0;">全局预缓冲时长 (ms)</label>
+                            <input type="number" class="form-input" id="input-airplay2-prebuffer" min="0" max="2000" step="50" style="width: 90px; text-align: right;" value="0">
+                        </div>
+
+                        <div class="toggle-row" style="margin-top: 16px;">
+                            <div class="toggle-info">
+                                <div class="toggle-desc">全局开启同步调试指标</div>
+                            </div>
+                            <label class="switch">
+                                <input type="checkbox" id="chk-airplay2-sync-debug">
+                                <span class="slider"></span>
+                            </label>
                         </div>
                     </div>
                 </div>
@@ -1496,6 +1569,15 @@
             if (data.airplay_mode) {
                 document.getElementById('select-airplay-mode').value = data.airplay_mode;
             }
+            document.getElementById('input-airplay2-latency').value = data.airplay2_latency_offset_ms ?? 0;
+            if (data.airplay2_prebuffer_ms !== undefined) {
+                document.getElementById('input-airplay2-prebuffer').value = data.airplay2_prebuffer_ms;
+            }
+            if (data.airplay2_sync_debug !== undefined) {
+                document.getElementById('chk-airplay2-sync-debug').checked = !!data.airplay2_sync_debug;
+            }
+            updateAirPlayLatencyDisplay();
+            toggleAirPlayLatency();
             toggleDefaultVolume();
 
             // 保存初始值快照，用于变更检测
@@ -1506,9 +1588,21 @@
                 follow_device_volume: document.getElementById('chk-follow-volume').checked,
                 auto_restart: document.getElementById('chk-auto-restart').checked,
                 airplay_mode: document.getElementById('select-airplay-mode').value,
+                airplay2_latency_offset_ms: parseInt(document.getElementById('input-airplay2-latency').value),
+                airplay2_prebuffer_ms: parseInt(document.getElementById('input-airplay2-prebuffer').value || 0),
+                airplay2_sync_debug: document.getElementById('chk-airplay2-sync-debug').checked,
                 dlna_port: parseInt(document.getElementById('input-dlna-port').value),
                 web_port: parseInt(document.getElementById('input-web-port').value),
             };
+        }
+
+        function updateAirPlayLatencyDisplay() {
+            const value = Number(document.getElementById('input-airplay2-latency').value);
+            document.getElementById('airplay2-latency-display').textContent = `${value > 0 ? '+' : ''}${value} ms`;
+        }
+
+        function toggleAirPlayLatency() {
+            document.getElementById('div-airplay2-latency').hidden = document.getElementById('select-airplay-mode').value !== 'experimental';
         }
 
         function toggleDefaultVolume() {
@@ -1810,11 +1904,16 @@
                 const did = dev.miotDID;
                 const isSelected = selectedList.includes(did);
                 const info = getDeviceInfo(dev.hardware);
-                const displayName = (currentSetting.speakers && currentSetting.speakers[did])
-                    ? currentSetting.speakers[did].dlna_name : dev.name;
+                const spkConfig = (currentSetting.speakers && currentSetting.speakers[did]) ? currentSetting.speakers[did] : {};
+                const displayName = spkConfig.dlna_name || dev.name;
                 const inNeedList = currentSetting.need_use_play_music_api && currentSetting.need_use_play_music_api.some(model => dev.hardware.includes(model));
-                const isCompatibilityMode = (currentSetting.speakers && currentSetting.speakers[did] && currentSetting.speakers[did].compatibility_mode !== null)
-                    ? !!currentSetting.speakers[did].compatibility_mode : !inNeedList;
+                const isCompatibilityMode = (spkConfig.compatibility_mode !== undefined && spkConfig.compatibility_mode !== null)
+                    ? !!spkConfig.compatibility_mode : !inNeedList;
+                const ap2Enabled = spkConfig.airplay2_enabled !== undefined ? !!spkConfig.airplay2_enabled : true;
+                const ap2Port = spkConfig.airplay2_port || '';
+                const ap2Latency = spkConfig.airplay2_latency_offset_ms ?? 0;
+                const ap2Prebuffer = spkConfig.airplay2_prebuffer_ms ?? 0;
+                const ap2Debug = !!spkConfig.airplay2_sync_debug;
 
                 html += `
                 <div class="device-item ${isSelected ? 'selected' : ''}" onclick="toggleDevice(this, '${did}')">
@@ -1829,6 +1928,29 @@
                                 <span style="font-size: 11px; color: var(--text-secondary);">兼容模式</span>
                             </label>
                         </div>
+                        <div class="device-ap2-bar" onclick="event.stopPropagation()" style="margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--border); display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 11px; color: var(--text-secondary);">
+                            <label style="display: flex; align-items: center; gap: 4px; cursor: pointer;">
+                                <input type="checkbox" class="spk-ap2-chk" data-did="${did}" ${ap2Enabled ? 'checked' : ''}>
+                                <span>启用AP2</span>
+                            </label>
+                            <span style="color: var(--text-muted);">|</span>
+                            <span>端口: <b style="color:var(--text);">${ap2Port || '自动'}</b></span>
+                            <span style="color: var(--text-muted);">|</span>
+                            <label style="display: flex; align-items: center; gap: 4px;" title="负值提前，正值延后">
+                                <span>时差:</span>
+                                <input type="number" class="spk-latency-input" data-did="${did}" value="${ap2Latency}" min="-2000" max="2000" step="10"
+                                    style="width: 54px; padding: 1px 4px; font-size: 11px; background: rgba(0,0,0,0.25); border: 1px solid var(--border); border-radius: 4px; color: var(--text); text-align: right;"> ms
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 4px;" title="初始预缓冲时长">
+                                <span>缓冲:</span>
+                                <input type="number" class="spk-prebuffer-input" data-did="${did}" value="${ap2Prebuffer}" min="0" max="2000" step="50"
+                                    style="width: 48px; padding: 1px 4px; font-size: 11px; background: rgba(0,0,0,0.25); border: 1px solid var(--border); border-radius: 4px; color: var(--text); text-align: right;"> ms
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 4px; cursor: pointer;">
+                                <input type="checkbox" class="spk-debug-chk" data-did="${did}" ${ap2Debug ? 'checked' : ''}>
+                                <span>指标</span>
+                            </label>
+                        </div>
                     </div>
                     <div class="device-checkbox">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="${isSelected ? 'var(--accent)' : 'var(--text-muted)'}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
@@ -1840,17 +1962,24 @@
             container.innerHTML = html;
             document.getElementById('btn-save').disabled = false;
 
-            // 记录初始选中状态和设备名，用于变更检测
+            // 记录初始选中状态、设备名及 AP2 设置，用于变更检测
             _initialSelectedDids = selectedList.filter(Boolean).sort().join(',');
             _initialDeviceNames = {};
             _initialCompatibilityModes = {};
+            _initialAp2Settings = {};
             devices.forEach(dev => {
                 const did = dev.miotDID;
-                _initialDeviceNames[did] = (currentSetting.speakers && currentSetting.speakers[did])
-                    ? currentSetting.speakers[did].dlna_name : dev.name;
+                const spkConfig = (currentSetting.speakers && currentSetting.speakers[did]) ? currentSetting.speakers[did] : {};
+                _initialDeviceNames[did] = spkConfig.dlna_name || dev.name;
                 const inNeedList = currentSetting.need_use_play_music_api && currentSetting.need_use_play_music_api.some(model => dev.hardware.includes(model));
-                _initialCompatibilityModes[did] = (currentSetting.speakers && currentSetting.speakers[did] && currentSetting.speakers[did].compatibility_mode !== null)
-                    ? !!currentSetting.speakers[did].compatibility_mode : !inNeedList;
+                _initialCompatibilityModes[did] = (spkConfig.compatibility_mode !== undefined && spkConfig.compatibility_mode !== null)
+                    ? !!spkConfig.compatibility_mode : !inNeedList;
+                _initialAp2Settings[did] = {
+                    enabled: spkConfig.airplay2_enabled !== undefined ? !!spkConfig.airplay2_enabled : true,
+                    latency: spkConfig.airplay2_latency_offset_ms ?? 0,
+                    prebuffer: spkConfig.airplay2_prebuffer_ms ?? 0,
+                    debug: !!spkConfig.airplay2_sync_debug,
+                };
             });
         }
 
@@ -1869,7 +1998,7 @@
             const selected = Array.from(document.querySelectorAll('.device-item.selected'))
                 .map(item => item.querySelector('input').getAttribute('onblur').match(/'([^']+)'/)[1]);
 
-            // 检查是否有变更（选中列表 + 设备名称 + 兼容模式）
+            // 检查是否有变更（选中列表 + 设备名称 + 兼容模式 + AP2 配置）
             const currentDids = selected.sort().join(',');
             let namesChanged = false;
             if (_initialDeviceNames) {
@@ -1891,7 +2020,24 @@
                 });
             }
 
-            if (!namesChanged && !compatibilityChanged && _initialSelectedDids !== null && currentDids === _initialSelectedDids) {
+            let ap2Changed = false;
+            if (typeof _initialAp2Settings !== 'undefined') {
+                document.querySelectorAll('.spk-latency-input').forEach(input => {
+                    const did = input.getAttribute('data-did');
+                    const prebufferInput = document.querySelector(`.spk-prebuffer-input[data-did="${did}"]`);
+                    const debugChk = document.querySelector(`.spk-debug-chk[data-did="${did}"]`);
+                    const ap2EnabledChk = document.querySelector(`.spk-ap2-chk[data-did="${did}"]`);
+                    const init = _initialAp2Settings[did] || {};
+                    if (parseInt(input.value || 0) !== (init.latency || 0) ||
+                        parseInt(prebufferInput ? prebufferInput.value : 0) !== (init.prebuffer || 0) ||
+                        (debugChk ? debugChk.checked : false) !== (init.debug ?? false) ||
+                        (ap2EnabledChk ? ap2EnabledChk.checked : true) !== (init.enabled ?? true)) {
+                        ap2Changed = true;
+                    }
+                });
+            }
+
+            if (!namesChanged && !compatibilityChanged && !ap2Changed && _initialSelectedDids !== null && currentDids === _initialSelectedDids) {
                 showTip(document.getElementById('tip-save'), '没有变更的设置项', 'error');
                 return;
             }
@@ -1902,9 +2048,17 @@
                 const dlnaName = input.value;
                 const compatibilityCheckbox = document.querySelector(`.compatibility-checkbox[data-did="${did}"]`);
                 const compatibilityMode = compatibilityCheckbox ? compatibilityCheckbox.checked : false;
+                const latencyInput = document.querySelector(`.spk-latency-input[data-did="${did}"]`);
+                const prebufferInput = document.querySelector(`.spk-prebuffer-input[data-did="${did}"]`);
+                const debugChk = document.querySelector(`.spk-debug-chk[data-did="${did}"]`);
+                const ap2EnabledChk = document.querySelector(`.spk-ap2-chk[data-did="${did}"]`);
                 speakersData[did] = {
                     dlna_name: dlnaName,
-                    compatibility_mode: compatibilityMode
+                    compatibility_mode: compatibilityMode,
+                    airplay2_enabled: ap2EnabledChk ? ap2EnabledChk.checked : true,
+                    airplay2_latency_offset_ms: latencyInput ? parseInt(latencyInput.value || 0) : 0,
+                    airplay2_prebuffer_ms: prebufferInput ? parseInt(prebufferInput.value || 0) : 0,
+                    airplay2_sync_debug: debugChk ? debugChk.checked : false,
                 };
             });
 
@@ -1995,6 +2149,9 @@
                 follow_device_volume: document.getElementById('chk-follow-volume').checked,
                 auto_restart: document.getElementById('chk-auto-restart').checked,
                 airplay_mode: document.getElementById('select-airplay-mode').value,
+                airplay2_latency_offset_ms: parseInt(document.getElementById('input-airplay2-latency').value),
+                airplay2_prebuffer_ms: parseInt(document.getElementById('input-airplay2-prebuffer').value || 0),
+                airplay2_sync_debug: document.getElementById('chk-airplay2-sync-debug').checked,
                 dlna_port: parseInt(document.getElementById('input-dlna-port').value),
                 web_port: parseInt(document.getElementById('input-web-port').value),
             };
@@ -2060,27 +2217,82 @@
             let html = '';
             speakers.forEach(s => {
                 const isPlaying = s.airplay_active || s.transport_state === 'PLAYING';
-                // 只有在非空闲（有媒体、播放中、暂停等）时才显示标签
                 const showBadge = s.airplay_active || (s.current_uri && s.transport_state !== 'NO_MEDIA_PRESENT');
 
                 const info = getDeviceInfo(s.hardware);
                 let source = s.airplay_active ? (s.airplay_client || '苹果设备') : formatSource(s.current_uri);
+                const isAp2 = s.airplay_mode === 'experimental';
+                const hasStats = s.timing_stats && (s.timing_stats.session_start_time || s.timing_stats.queue_depth > 0 || s.airplay2_sync_debug);
+                const stats = s.timing_stats || {};
 
                 html += `
-                <div class="speaker-item">
-                    <div class="speaker-info">
-                        <div class="speaker-header">
-                            <span class="speaker-name">${s.dlna_name}</span>
-                            ${showBadge ? `<span class="badge ${s.airplay_active ? 'badge-airplay' : 'badge-dlna'}">${s.airplay_active ? 'AirPlay' : 'DLNA'}</span>` : ''}
+                <div class="speaker-item" style="flex-direction: column; align-items: stretch; gap: 8px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px;">
+                        <div class="speaker-info">
+                            <div class="speaker-header">
+                                <span class="speaker-name">${s.dlna_name}</span>
+                                ${showBadge ? `<span class="badge ${s.airplay_active ? 'badge-airplay' : 'badge-dlna'}">${s.airplay_active ? (isAp2 ? 'AirPlay 2' : 'AirPlay 1') : 'DLNA'}</span>` : ''}
+                                ${isAp2 ? `<span class="badge ${s.airplay_instance_status === 'running' ? 'badge-status-running' : (s.airplay_instance_status === 'stopped' ? 'badge-status-stopped' : '')}">${s.airplay_instance_status === 'running' ? 'AP2 运行中' : (s.airplay_instance_status === 'stopped' ? 'AP2 已停止' : 'AP2 待命')}</span>` : ''}
+                            </div>
+                            <div class="speaker-meta">
+                                ${info.model} · ${source ? '来自 ' + source : '暂无媒体'}
+                                ${isAp2 ? ` · RTSP: <b style="color:var(--text);">${s.airplay2_port || '自动'}</b> · ID: <b style="color:var(--text);">${s.airplay_device_id ? s.airplay_device_id.replace(/^0x|L$/g, '') : '-'}</b>` : ''}
+                            </div>
                         </div>
-                        <div class="speaker-meta">${info.model} · ${source ? '来自 ' + source : '暂无媒体'}</div>
+                        <div style="display: flex; align-items: center; gap: 6px;">
+                            ${isAp2 ? `<button class="btn-xs" onclick="restartSpeakerAirplay('${s.did}')" title="重启该音箱的独立 AirPlay 2 进程">重启 AP2</button>` : ''}
+                            <div class="speaker-status ${isPlaying ? 'playing' : ''}">
+                                ${isPlaying ? '正在播放' : (stateMap[s.transport_state] || '待机')}
+                            </div>
+                        </div>
                     </div>
-                    <div class="speaker-status ${isPlaying ? 'playing' : ''}">
-                        ${isPlaying ? '正在播放' : (stateMap[s.transport_state] || '待机')}
-                    </div>
+                    ${(isAp2 || hasStats) ? `
+                    <div style="margin-top: 2px; padding-top: 6px; border-top: 1px dashed var(--border);">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <span style="font-size: 11px; color: var(--text-secondary);">
+                                时差补偿: <b style="color:var(--text);">${s.airplay2_latency_offset_ms || 0} ms</b> | 预缓冲: <b style="color:var(--text);">${s.airplay2_prebuffer_ms || 0} ms</b>
+                            </span>
+                            <button class="btn-xs" onclick="toggleDebugBox('${s.did}')" style="font-size: 10px; padding: 1px 6px;">
+                                ${window['_debug_open_' + s.did] ? '收起指标' : '同步指标'}
+                            </button>
+                        </div>
+                        <div class="spk-debug-box" id="debug-box-${s.did}" style="display: ${window['_debug_open_' + s.did] ? 'grid' : 'none'};">
+                            <div>队列深度: <b style="color:var(--text);">${stats.queue_depth || 0}</b></div>
+                            <div>缓冲时长: <b style="color:var(--text);">${(stats.buffer_duration_ms || 0).toFixed(0)} ms</b></div>
+                            <div>丢帧数量: <b style="color:var(--text);">${stats.dropped_frames || 0}</b></div>
+                            <div>静音欠载: <b style="color:var(--text);">${stats.underflow_count || 0}</b></div>
+                            <div>PCM首到达: <b style="color:var(--text);">${stats.pcm_first_data_time ? stats.pcm_first_data_time.toFixed(2) + 's' : '-'}</b></div>
+                            <div>音箱HTTP拉流: <b style="color:var(--text);">${stats.speaker_http_connected_time ? stats.speaker_http_connected_time.toFixed(2) + 's' : '-'}</b></div>
+                            <div>首次发送音频: <b style="color:var(--text);">${stats.first_audio_sent_time ? stats.first_audio_sent_time.toFixed(2) + 's' : '-'}</b></div>
+                            <div>重连次数: <b style="color:var(--text);">${stats.reconnect_count || 0}</b></div>
+                        </div>
+                    </div>` : ''}
                 </div>`;
             });
             container.innerHTML = html;
+        }
+
+        async function restartSpeakerAirplay(did) {
+            if (!confirm('确定要独立重启该音箱的 AirPlay 2 服务吗？')) return;
+            try {
+                const resp = await fetch(`./api/speakers/${did}/restart_airplay`, { method: 'POST' });
+                const res = await resp.json();
+                if (res.ok) {
+                    fetchRenderers();
+                } else {
+                    alert('重启失败: ' + (res.message || '未知错误'));
+                }
+            } catch (e) {
+                alert('请求失败: ' + e);
+            }
+        }
+
+        function toggleDebugBox(did) {
+            window['_debug_open_' + did] = !window['_debug_open_' + did];
+            const el = document.getElementById('debug-box-' + did);
+            if (el) {
+                el.style.display = window['_debug_open_' + did] ? 'grid' : 'none';
+            }
         }
 
         function formatSource(uri) {

@@ -18,7 +18,6 @@ from aiohttp import web
 
 log = logging.getLogger("miair")
 
-# --- 队列参数 ---
 # 每个 ALAC 包约 8ms (352 samples @ 44100Hz)
 # 100 个包 ≈ 800ms 的缓冲上限，兼顾低延迟与抗 WiFi 抖动
 _QUEUE_MAXSIZE = 100
@@ -29,17 +28,29 @@ class AudioStreamServer:
 
     接收 PCM 音频数据，通过 HTTP 提供给小爱音箱播放。
     根据音箱型号选择 MP3 (ffmpeg 转码) 或 WAV (直接输出) 格式。
+    支持纳秒级单调时钟观测、连续 PCM 时间轴毫秒级采样偏移与预缓冲补偿。
     """
 
-    def __init__(self, hostname: str, port: int = 0, audio_format: str = "wav"):
+    def __init__(
+        self,
+        hostname: str,
+        port: int = 0,
+        audio_format: str = "wav",
+        latency_offset_ms: int = 0,
+        prebuffer_ms: int = 0,
+        sync_debug: bool = False,
+    ):
         self.hostname = hostname
         self.port = port
         self._audio_format = audio_format  # "mp3" or "wav"
+        self.latency_offset_ms = latency_offset_ms
+        self.prebuffer_ms = prebuffer_ms
+        self.sync_debug = sync_debug
         self._app = web.Application()
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
 
-        # 音频数据队列 - 小队列 = 低延迟
+        # 音频数据队列 - 有界缓冲保证内存安全
         self._audio_queue: queue.Queue[bytes | None] = queue.Queue(maxsize=_QUEUE_MAXSIZE)
         self._sample_rate = 44100
         self._channels = 2
@@ -49,6 +60,21 @@ class AudioStreamServer:
         self._session_id = int(time.time())
         self._has_clients = False
         self._client_lock = threading.Lock()
+        self._queue_bytes: int = 0
+
+        # 时间观测体系 (单调时钟 time.monotonic)
+        self._timing = {
+            "session_start_time": 0.0,
+            "pcm_first_data_time": 0.0,
+            "http_stream_ready_time": 0.0,
+            "speaker_http_connected_time": 0.0,
+            "first_audio_sent_time": 0.0,
+            "overflow_count": 0,
+            "underflow_count": 0,
+            "dropped_frames": 0,
+            "stop_count": 0,
+            "reconnect_count": 0,
+        }
 
         self._setup_routes()
 
@@ -69,6 +95,7 @@ class AudioStreamServer:
         self._site = web.TCPSite(self._runner, "0.0.0.0", self.port)
         await self._site.start()
         self.port = self._site._server.sockets[0].getsockname()[1]
+        self._timing["http_stream_ready_time"] = time.monotonic()
         log.info(f"AirPlay 音频流服务器: http://{self.hostname}:{self.port} (格式: {self._audio_format})")
 
     async def stop(self):
@@ -89,22 +116,29 @@ class AudioStreamServer:
         self._active = True
         self._abort = False
         self._session_id = int(time.time())
+        self._timing["session_start_time"] = time.monotonic()
+        self._timing["pcm_first_data_time"] = 0.0
+        self._timing["speaker_http_connected_time"] = 0.0
+        self._timing["first_audio_sent_time"] = 0.0
         # 快速清空队列
         while True:
             try:
                 self._audio_queue.get_nowait()
             except queue.Empty:
                 break
+        self._queue_bytes = 0
         log.info(f"音频流: 开始接收 PCM 数据 (格式: {self._audio_format})")
 
     def stop_streaming(self):
         self._active = False
         self._abort = True
+        self._timing["stop_count"] += 1
         while True:
             try:
                 self._audio_queue.get_nowait()
             except queue.Empty:
                 break
+        self._queue_bytes = 0
         try:
             self._audio_queue.put_nowait(None)
         except queue.Full:
@@ -115,22 +149,64 @@ class AudioStreamServer:
         """写入 PCM 音频数据 — 非阻塞，队列满时批量丢弃旧数据腾出空间"""
         if not self._active:
             return
+        now = time.monotonic()
+        if not self._timing["pcm_first_data_time"]:
+            self._timing["pcm_first_data_time"] = now
+            if self.sync_debug:
+                delta = now - self._timing["session_start_time"] if self._timing["session_start_time"] else 0.0
+                log.info(f"[{self.hostname}:{self.port}] PCM 首次流入 FIFO/AudioStream, 耗时: {delta:.3f}s")
+
         try:
             self._audio_queue.put_nowait(data)
+            self._queue_bytes += len(data)
         except queue.Full:
-            # 批量丢弃旧数据，一次性腾出足够空间，避免反复 put/get 开销
-            dropped = 0
-            target = _QUEUE_MAXSIZE // 4  # 丢弃 25% 腾出充裕空间
+            self._timing["overflow_count"] += 1
+            dropped_bytes = 0
+            # 批量丢弃旧数据，一次性腾出足够空间
+            target = max(1, _QUEUE_MAXSIZE // 4)
             try:
                 for _ in range(target):
-                    self._audio_queue.get_nowait()
-                    dropped += 1
+                    chunk = self._audio_queue.get_nowait()
+                    if chunk:
+                        dropped_bytes += len(chunk)
             except queue.Empty:
                 pass
+            frame_size = self._channels * self._sample_width
+            self._timing["dropped_frames"] += dropped_bytes // frame_size
+            self._queue_bytes = max(0, self._queue_bytes - dropped_bytes)
             try:
                 self._audio_queue.put_nowait(data)
+                self._queue_bytes += len(data)
             except queue.Full:
                 pass
+
+    def get_timing_stats(self) -> dict:
+        """获取当前音频流的高精度单调时钟观测与缓冲状态"""
+        now = time.monotonic()
+        q_size = self._audio_queue.qsize()
+        frame_size = max(1, self._channels * self._sample_width)
+        bytes_in_q = max(0, self._queue_bytes)
+        approx_buffer_ms = round((bytes_in_q / frame_size) / (self._sample_rate / 1000.0), 1)
+        sess_start = self._timing["session_start_time"]
+        return {
+            "session_active": self._active,
+            "has_client": self._has_clients,
+            "session_start_time": sess_start,
+            "pcm_first_data_time": self._timing["pcm_first_data_time"],
+            "http_stream_ready_time": self._timing["http_stream_ready_time"],
+            "speaker_http_connected_time": self._timing["speaker_http_connected_time"],
+            "first_audio_sent_time": self._timing["first_audio_sent_time"],
+            "elapsed_since_session_start_sec": round(now - sess_start, 3) if sess_start else 0.0,
+            "audio_queue_depth": q_size,
+            "buffer_duration_ms": approx_buffer_ms,
+            "overflow_count": self._timing["overflow_count"],
+            "underflow_count": self._timing["underflow_count"],
+            "dropped_frames": self._timing["dropped_frames"],
+            "stop_count": self._timing["stop_count"],
+            "reconnect_count": self._timing["reconnect_count"],
+            "latency_offset_ms": self.latency_offset_ms,
+            "prebuffer_ms": self.prebuffer_ms,
+        }
 
     # ============================================================
     # WAV 模式 — 直接输出 PCM，零编码延迟
@@ -191,7 +267,33 @@ class AudioStreamServer:
             self._has_clients = True
         self._abort = False  # 重置中断标志，允许续播
 
+        now = time.monotonic()
+        if self._timing["speaker_http_connected_time"] > 0:
+            self._timing["reconnect_count"] += 1
+        self._timing["speaker_http_connected_time"] = now
+        if self.sync_debug:
+            delta_sess = now - self._timing["session_start_time"] if self._timing["session_start_time"] else 0.0
+            delta_pcm = now - self._timing["pcm_first_data_time"] if self._timing["pcm_first_data_time"] else 0.0
+            log.info(f"[{self.hostname}:{self.port}] 音箱 HTTP 已连接 (距会话: {delta_sess:.3f}s, 距首PCM: {delta_pcm:.3f}s)")
         log.info("AirPlay: 音箱开始拉取 WAV 音频流 (零编码延迟)")
+
+        # 计算连续 PCM 时间轴偏移补偿（对齐到 4 字节帧边界）
+        frame_size = self._channels * self._sample_width  # 4 字节
+        offset_ms = self.latency_offset_ms
+        if offset_ms > 0:
+            # 延后播放：在音频数据最开始填充静音帧
+            delay_frames = int(round(self._sample_rate * offset_ms / 1000.0))
+            initial_silence = b"\x00" * (delay_frames * frame_size)
+            bytes_to_skip = 0
+        elif offset_ms < 0:
+            # 提前播放：跳过音频流最开始的一段采样
+            initial_silence = b""
+            bytes_to_skip = int(round(self._sample_rate * abs(offset_ms) / 1000.0)) * frame_size
+        else:
+            initial_silence = b""
+            bytes_to_skip = 0
+
+        prebuffer_bytes = int(round(self._sample_rate * max(0, self.prebuffer_ms) / 1000.0)) * frame_size
 
         # 使用 asyncio.Event 在写入线程和事件循环间通信
         loop = asyncio.get_event_loop()
@@ -204,6 +306,9 @@ class AudioStreamServer:
             """专用线程：从队列批量读取 PCM 并通知事件循环"""
             nonlocal writer_done
             empty_streak = 0
+            prebuffer_accumulated = 0
+            is_prebuffering = (prebuffer_bytes > 0)
+            prebuffer_start = time.monotonic()
             try:
                 while self._active and not self._abort:
                     try:
@@ -222,12 +327,21 @@ class AudioStreamServer:
                                 break
                         with data_lock:
                             pending_data.extend(local_batch)
-                        loop.call_soon_threadsafe(data_ready.set)
+                        self._queue_bytes = max(0, self._queue_bytes - sum(len(c) for c in local_batch))
+
+                        if is_prebuffering:
+                            prebuffer_accumulated += sum(len(c) for c in local_batch)
+                            if prebuffer_accumulated >= prebuffer_bytes or (time.monotonic() - prebuffer_start > 0.8):
+                                is_prebuffering = False
+                                loop.call_soon_threadsafe(data_ready.set)
+                        else:
+                            loop.call_soon_threadsafe(data_ready.set)
                         empty_streak = 0
                     except queue.Empty:
                         empty_streak += 1
                         # 3 秒无数据写入静音保持连接
                         if empty_streak > 100:
+                            self._timing["underflow_count"] += 1
                             silence = b'\x00' * (self._sample_rate * self._channels * self._sample_width // 50)
                             with data_lock:
                                 pending_data.append(silence)
@@ -246,6 +360,10 @@ class AudioStreamServer:
             # 发送 WAV 头
             await response.write(self._build_wav_header())
 
+            # 若配置了正延迟补偿，先发送连续且对齐的静音填充
+            if initial_silence:
+                await response.write(initial_silence)
+
             while not writer_done:
                 await data_ready.wait()
                 data_ready.clear()
@@ -253,8 +371,22 @@ class AudioStreamServer:
                     chunks = pending_data
                     pending_data = []
                 if chunks:
-                    # 批量写入：合并所有 chunk 一次性写出
-                    await response.write(b"".join(chunks))
+                    chunk_bytes = b"".join(chunks)
+                    if bytes_to_skip > 0:
+                        if len(chunk_bytes) <= bytes_to_skip:
+                            bytes_to_skip -= len(chunk_bytes)
+                            continue
+                        else:
+                            chunk_bytes = chunk_bytes[bytes_to_skip:]
+                            bytes_to_skip = 0
+
+                    if self._timing["first_audio_sent_time"] == 0:
+                        self._timing["first_audio_sent_time"] = time.monotonic()
+                        if self.sync_debug:
+                            delta_conn = self._timing["first_audio_sent_time"] - self._timing["speaker_http_connected_time"]
+                            log.info(f"[{self.hostname}:{self.port}] 首批音频数据已发送至音箱 (从音箱连接到首包耗时: {delta_conn:.3f}s)")
+
+                    await response.write(chunk_bytes)
         except (ConnectionResetError, BrokenPipeError):
             log.info("AirPlay: 音箱断开 WAV 音频流连接")
         except Exception as e:
